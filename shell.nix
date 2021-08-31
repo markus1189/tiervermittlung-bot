@@ -6,6 +6,7 @@ pkgs.mkShell {
     cacert
     coreutils
     gnugrep
+    jo
     jq
     mktemp
     pandoc
