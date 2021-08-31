@@ -36,7 +36,6 @@ postLink() {
          -F media="${JSON_ARRAY}" \
          ${FLAGS}
     echo
-
     sleep 3
 
     echo "${VIDEO_URIS}" | while read -r video; do
@@ -46,22 +45,20 @@ postLink() {
             echo "Sending video"
             curl --retry 3 -s -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}"
             echo
+            sleep 3
         fi
-
-
-        sleep 3
     done
 
     echo "Sending link"
     curl --retry 3 -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}"
     echo
+    sleep 3
 
     # Cleanup TEMP
     rm "${TEMP}"/* && rmdir "${TEMP}"
 
     echo "Done"
 
-    sleep 3
 }
 
 filterUrl() {
