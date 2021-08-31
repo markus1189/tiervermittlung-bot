@@ -34,6 +34,7 @@ postLink() {
          --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup" \
          -F chat_id="${TELEGRAM_CHAT_ID}" \
          -F media="${JSON_ARRAY}" \
+         -F disable_notification=true \
          ${FLAGS}
     echo
     sleep 3
@@ -43,14 +44,14 @@ postLink() {
             :
         else
             echo "Sending video"
-            curl --retry 3 -s -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}"
+            curl --retry 3 -s -F disable_notification=true -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}"
             echo
             sleep 3
         fi
     done
 
     echo "Sending link"
-    curl --retry 3 -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}"
+    curl --retry 3 -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}&disable_notification=true"
     echo
     sleep 3
 
