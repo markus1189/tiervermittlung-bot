@@ -1,7 +1,7 @@
 #!/usr/bin/env nix-shell
 
 #!nix-shell -i bash
-#!nix-shell -p bash pup gnugrep jq wget pandoc mktemp parallel coreutils
+#!nix-shell shell.nix
 
 getLinksForYesterday() {
     curl -s 'https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=100&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen' | pup --charset iso-8859-1  --color '#Item_Results json{}' | jq -r '(now | todate | fromdate - 86400 | gmtime | strftime("%d.%m.%Y")) as $yesterday | map({date: .children[1].text, link: .children[0].children[0].children[0].href} | select(.date == $yesterday) | .link)[]'
@@ -26,28 +26,27 @@ postLink() {
                 NAME="$(basename "$i")"
                 jo type=photo media="attach://$NAME"
             done
-
-            if [[ ! -z "VIDEO_URIS" ]]; then
-                echo "${VIDEO_URIS}" | while read -r v; do
-                    if [[ -z "${v}" ]]; then
-                        :
-                    else
-                        jo type=video media="$v"
-                    fi
-                done
-            fi
            )
               )
-
-    echo "${JSON_ARRAY}"
 
     curl --silent -XPOST \
          --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup" \
          -F chat_id="${TELEGRAM_CHAT_ID}" \
          -F media="${JSON_ARRAY}" \
-         ${FLAGS}
+         ${FLAGS} > /dev/null
 
     sleep 3
+
+    echo "${VIDEO_URIS}" | while read -r video; do
+        if [[ -z "${video}" ]]; then
+            :
+        else
+            curl -s -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}" > /dev/null
+        fi
+
+
+        sleep 3
+    done
 
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}" > /dev/null
 
