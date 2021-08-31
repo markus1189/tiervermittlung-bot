@@ -29,11 +29,13 @@ postLink() {
            )
               )
 
+    echo Sending photos
     curl --retry 3 --silent -XPOST \
          --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMediaGroup" \
          -F chat_id="${TELEGRAM_CHAT_ID}" \
          -F media="${JSON_ARRAY}" \
-         ${FLAGS} > /dev/null
+         ${FLAGS}
+    echo
 
     sleep 3
 
@@ -41,17 +43,23 @@ postLink() {
         if [[ -z "${video}" ]]; then
             :
         else
-            curl --retry 3 -s -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}" > /dev/null
+            echo "Sending video"
+            curl --retry 3 -s -F video="${video}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo?chat_id=${TELEGRAM_CHAT_ID}"
+            echo
         fi
 
 
         sleep 3
     done
 
-    curl --retry 3 -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}" > /dev/null
+    echo "Sending link"
+    curl --retry 3 -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${1}"
+    echo
 
     # Cleanup TEMP
     rm "${TEMP}"/* && rmdir "${TEMP}"
+
+    echo "Done"
 
     sleep 3
 }
