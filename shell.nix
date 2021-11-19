@@ -1,7 +1,24 @@
 { pkgs ? import <nixpkgs> { } }:
 
-pkgs.mkShell {
+let
+  hsPkgs = pkgs.haskellPackages.ghcWithPackages (p:
+    with p; [
+      wreq
+      lens
+      rio
+      taggy-lens
+      haskell-language-server
+      tasty
+      tasty-golden
+      tasty-hedgehog
+      tasty-hunit
+      tasty-hspec
+    ]);
+
+in pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
+    hsPkgs
+
     bash
     cacert
     coreutils
