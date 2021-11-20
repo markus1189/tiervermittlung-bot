@@ -8,11 +8,14 @@ let
       rio
       taggy-lens
       haskell-language-server
+      retry
       tasty
       tasty-golden
       tasty-hedgehog
       tasty-hunit
       tasty-hspec
+      temporary
+      token-bucket
     ]);
 
 in pkgs.mkShell {
