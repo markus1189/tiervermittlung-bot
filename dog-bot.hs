@@ -1,16 +1,22 @@
 #!/usr/bin/env nix-shell
 #!nix-shell -i runhaskell
 #!nix-shell --pure
+#!nix-shell --keep TELEGRAM_BOT_TOKEN
 #!nix-shell shell.nix
 
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
+import           Control.Concurrent.TokenBucket (TokenBucket, newTokenBucket, tokenBucketWait)
 import           Control.Lens
   ( filtered,
     filteredBy,
@@ -23,17 +29,25 @@ import           Control.Lens
     _Just,
   )
 import           Control.Lens.Operators ((<&>), (^.), (^..), (^?))
+import           Control.Lens.TH (makeClassy)
+import           Control.Monad.Catch
+import           Control.Monad.IO.Class
+import           Control.Monad.Reader
 import           Data.Aeson
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BS
+import           Data.Foldable (for_)
 import           Data.Maybe (isJust, mapMaybe, maybeToList)
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as Lazy
 import           Data.Text.Lazy.Encoding (decodeLatin1)
 import           Data.Time (Day, defaultTimeLocale, getZonedTime, localDay, parseTimeM, zonedTimeToLocalTime)
+import           Data.Traversable (for)
 import           Network.Wreq (responseBody)
 import qualified Network.Wreq as Wreq
+import           System.Environment (getEnv)
+import           System.FilePath ((</>))
 import           System.IO.Temp (withSystemTempDirectory)
 import           Test.Tasty
 import           Test.Tasty.HUnit
@@ -46,18 +60,28 @@ import           Text.Taggy.Lens
     html,
     named,
   )
-import Data.Traversable (for)
-import System.FilePath ((</>))
-import Data.Foldable (for_)
-import System.Environment (getEnv)
-import Control.Monad.IO.Class
-import Control.Monad.Reader
-import Control.Monad.Catch
+import System.Log.Logger (saveGlobalLogger, getRootLogger, Priority (..), setLevel, setHandlers, logM)
+import Data.Text.Encoding (decodeUtf8)
+import Control.Retry (limitRetries, fullJitterBackoff, recovering)
+import Network.HTTP.Client
+    ( HttpException(HttpExceptionRequest),
+      HttpExceptionContent(StatusCodeException),
+      responseStatus )
+import Network.HTTP.Types.Status (Status(statusCode))
+import System.Log.Handler.Simple (streamHandler)
+import System.IO (stderr)
+import System.Log.Handler (setFormatter)
+import System.Log.Formatter (simpleLogFormatter)
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
 
 newtype Token = Token Text deriving (Show, Eq, Ord)
+
+data MyEnv = MyEnv { _envToken :: Token
+                   , _envTelegramBucket :: TokenBucket
+                   }
+makeClassy ''MyEnv
 
 data Entry = Entry {entryDay :: Day, entryLink :: Text} deriving (Show, Eq, Ord)
 
@@ -67,19 +91,22 @@ data Video = YoutubeVideo Text | DirectVideo Text deriving (Show, Eq, Ord)
 
 myTelegramChatId = "299952716"
 
-telegramSendMessage :: (MonadIO m, MonadReader Token m) => Text -> Text -> m ()
-telegramSendMessage chatId text = do
-  Token token <- ask
-  liftIO $ void $ Wreq.post ("https://api.telegram.org/bot/" <> Text.unpack token <> "/sendMessage")
-            (toJSON (object ["chat_id" .= chatId, "text" .= text]))
+telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => Text -> Text -> m ()
+telegramSendMessage chatId text = withRetry $ do
+  waitForToken
+  Token token <- view envToken
+  liftIO $ void $ Wreq.post ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMessage")
+            (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
 
-telegramSendMediaGroup :: (MonadIO m, MonadReader Token m) => [Wreq.Part] -> m ()
-telegramSendMediaGroup parts = do
-  Token token <- ask
+telegramSendMediaGroup :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => [Wreq.Part] -> m ()
+telegramSendMediaGroup parts = withRetry $ do
+  waitForToken
+  Token token <- view envToken
   liftIO $ void $ Wreq.post ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMediaGroup") parts
 
-sendPics :: (MonadMask m, MonadIO m, MonadReader Token m) => Details -> m ()
-sendPics (Details _ mTitle pics _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
+sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
+sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
+  liftIO . logM "dogbot.telegram.sendPics" INFO . Text.unpack $ "Sending pictures for " <> dUri
   picParts <- for pics $ \pic -> do
     let name = mediaName pic
         fp = tmpDir </> Text.unpack name
@@ -90,13 +117,18 @@ sendPics (Details _ mTitle pics _) = withSystemTempDirectory "tiervermittlung-ph
                                                , "media" .= ("attach://" <> n)
                                                ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) pics
       parts = [ Wreq.partText "chat_id" myTelegramChatId
+              , Wreq.partText "disable_notification" "true"
               , Wreq.partLBS "media" (Aeson.encode mediaJson)
               ] ++ picParts
+  liftIO $ do
+    logM "dogbot.telegram.pics" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
+    logM "dogbot.telegram.pics" DEBUG ("Number of parts: " <> show (length parts))
   telegramSendMediaGroup parts
 
-sendVideos :: (MonadMask m, MonadIO m, MonadReader Token m) => Details -> m ()
-sendVideos (Details _ mTitle _ videos) =
+sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
+sendVideos (Details dUri mTitle _ videos) =
   withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
+    liftIO . logM "dogbot.telegram.sendVideos" INFO . Text.unpack $ "Sending videos for " <> dUri <> "\n"
     let videoNames = concatMap (\case YoutubeVideo _ -> []
                                       DirectVideo u -> [mediaName u]) videos
     let filteredVideos = filter (\case YoutubeVideo _ -> False
@@ -116,21 +148,44 @@ sendVideos (Details _ mTitle _ videos) =
                                                  , "media" .= ("attach://" <> n)
                                                  ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) videoNames
         parts = [ Wreq.partText "chat_id" myTelegramChatId
+                , Wreq.partText "disable_notification" "true"
                 , Wreq.partLBS "media" (Aeson.encode mediaJson)
                 ] ++ videoParts
+    liftIO $ logM "dogbot.telegram.videos" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
     telegramSendMediaGroup parts
+
+sendLink d = do
+  liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
+  telegramSendMessage myTelegramChatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
 main :: IO ()
 main = do
+  logger <- getRootLogger
+  h <- flip setFormatter (simpleLogFormatter "[$time] $prio [$loggername] $msg") <$> streamHandler stderr DEBUG
+  saveGlobalLogger (setLevel DEBUG $ setHandlers [h] logger)
   token <- getEnv "TELEGRAM_BOT_TOKEN"
-  yesterday <- getYesterday
+  bucket <- newTokenBucket
+  let theEnv = MyEnv (Token (Text.pack token)) bucket
+  runReaderT loadAndProcessEntries theEnv
+
+loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
+loadAndProcessEntries = do
+  yesterday <- liftIO getYesterday
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
-  flip runReaderT (Token (Text.pack token)) $ for_ es $ \(Entry _ eLink) -> do
-    liftIO $ print eLink
+  liftIO . logM "dogbot" INFO $ "Processing " <> show (length es) <> " entries"
+  for_ es processEntry
+
+processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e m, HasMyEnv e) => Entry -> m ()
+processEntry (Entry _ eLink) = do
+  r <- try @m @SomeException $ do
+    liftIO . logM "dogbot" INFO . Text.unpack $ "Processing link: " <> eLink
     d <- loadDetails eLink
     sendPics d
     unless (null (detailsVideos d)) $ sendVideos d
-    telegramSendMessage myTelegramChatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
+    sendLink d
+  case r of
+    Left e -> liftIO . logM "dogbot" ERROR $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
+    Right () -> liftIO . logM "dogbot" NOTICE . Text.unpack $ "Finished processing entry: " <> eLink
 
 getYesterday :: IO Day
 getYesterday = pred . localDay . zonedTimeToLocalTime <$> getZonedTime
@@ -144,9 +199,10 @@ extractLink e = e ^? to universe . traverse . filteredBy (matchId "Titel_Results
 parseDate :: Text -> Maybe Day
 parseDate = parseTimeM False defaultTimeLocale "%-d.%-m.%Y" . Text.unpack
 
-loadEntries :: IO [Entry]
+loadEntries :: (MonadIO m, MonadMask m) => m [Entry]
 loadEntries = do
-  r <- Wreq.get uri
+  liftIO $ logM "dogbot" DEBUG "Loading entries"
+  r <- withRetry (liftIO $ Wreq.get uri)
   let rBody = decodeLatin1 $ r ^. responseBody
   pure (extractEntries rBody)
 
@@ -154,9 +210,9 @@ extractEntries body =
   mapMaybe (\e -> Entry <$> (extractDate e >>= parseDate) <*> extractLink e) $
   body ^.. html . to universe . traverse . element . filtered (\n -> isJust (n ^? matchId "Item_Results"))
 
-loadDetails :: MonadIO m => Text -> m Details
+loadDetails :: (MonadIO m, MonadMask m) => Text -> m Details
 loadDetails detailUri = do
-  body <- liftIO $ Wreq.get (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1
+  body <- withRetry (liftIO $ Wreq.get (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
   pure $ extractDetails detailUri body
 
 extractDetails :: Text -> Lazy.Text -> Details
@@ -187,8 +243,32 @@ matchClass = matchAttr "class"
 mediaName :: Text -> Text
 mediaName = Text.takeWhileEnd (/= '/')
 
-downloadImage :: MonadIO m => String -> m BS.ByteString
-downloadImage theUri = liftIO $ Wreq.get theUri <&> view responseBody
+downloadImage :: forall m. (MonadMask m, MonadIO m) => String -> m BS.ByteString
+downloadImage theUri = do
+  liftIO $ logM "dogbot.download" DEBUG $ "Downloading: " <> theUri
+  withRetry (liftIO $ Wreq.get theUri <&> view responseBody)
+
+withRetry action =
+  recovering (fullJitterBackoff (round @Double 1e6) <> limitRetries 5) [const $ Handler retryStatusException] $ const action
+  where
+    retryStatusException :: MonadIO m => HttpException -> m Bool
+    retryStatusException (HttpExceptionRequest _ (StatusCodeException r _)) = do
+      let s = statusCode (responseStatus r)
+          shouldRetry = s `elem` codesToRetry
+      liftIO $ if shouldRetry
+        then logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s
+        else logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
+      pure shouldRetry
+    retryStatusException _ = pure False
+    codesToRetry = [429]
+
+
+waitForToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m ()
+waitForToken = do
+  bucket <- view envTelegramBucket
+  liftIO $ tokenBucketWait bucket burstSize inverseRate
+  where burstSize = 1
+        inverseRate = round @Double 3e6
 
 -- Tests
 
