@@ -78,7 +78,10 @@ uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=defa
 
 newtype Token = Token Text deriving (Show, Eq, Ord)
 
+newtype ChatId = ChatId String deriving (Show, Eq, Ord)
+
 data MyEnv = MyEnv { _envToken :: Token
+                   , _envChatId :: ChatId
                    , _envTelegramBucket :: TokenBucket
                    }
 makeClassy ''MyEnv
@@ -89,10 +92,8 @@ data Details = Details {detailsUri :: Text, detailsTitle :: Maybe Text, detailsP
 
 data Video = YoutubeVideo Text | DirectVideo Text deriving (Show, Eq, Ord)
 
-myTelegramChatId = "299952716"
-
-telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => Text -> Text -> m ()
-telegramSendMessage chatId text = withRetry $ do
+telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => ChatId -> Text -> m ()
+telegramSendMessage (ChatId chatId) text = withRetry $ do
   waitForToken
   Token token <- view envToken
   liftIO $ void $ Wreq.post ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMessage")
@@ -106,6 +107,7 @@ telegramSendMediaGroup parts = withRetry $ do
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
 sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
+  ChatId chatId <- view envChatId
   liftIO . logM "dogbot.telegram.sendPics" INFO . Text.unpack $ "Sending pictures for " <> dUri
   picParts <- for pics $ \pic -> do
     let name = mediaName pic
@@ -116,7 +118,7 @@ sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung
   let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("photo" :: String)
                                                , "media" .= ("attach://" <> n)
                                                ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) pics
-      parts = [ Wreq.partText "chat_id" myTelegramChatId
+      parts = [ Wreq.partString "chat_id" chatId
               , Wreq.partText "disable_notification" "true"
               , Wreq.partLBS "media" (Aeson.encode mediaJson)
               ] ++ picParts
@@ -126,7 +128,8 @@ sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung
   telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendVideos (Details dUri mTitle _ videos) =
+sendVideos (Details dUri mTitle _ videos) = do
+  ChatId chatId <- view envChatId
   withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
     liftIO . logM "dogbot.telegram.sendVideos" INFO . Text.unpack $ "Sending videos for " <> dUri <> "\n"
     let videoNames = concatMap (\case YoutubeVideo _ -> []
@@ -147,7 +150,7 @@ sendVideos (Details dUri mTitle _ videos) =
     let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("video" :: String)
                                                  , "media" .= ("attach://" <> n)
                                                  ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) videoNames
-        parts = [ Wreq.partText "chat_id" myTelegramChatId
+        parts = [ Wreq.partString "chat_id" chatId
                 , Wreq.partText "disable_notification" "true"
                 , Wreq.partLBS "media" (Aeson.encode mediaJson)
                 ] ++ videoParts
@@ -155,8 +158,9 @@ sendVideos (Details dUri mTitle _ videos) =
     telegramSendMediaGroup parts
 
 sendLink d = do
+  chatId <- view envChatId
   liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
-  telegramSendMessage myTelegramChatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
+  telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
 main :: IO ()
 main = do
@@ -164,8 +168,9 @@ main = do
   h <- flip setFormatter (simpleLogFormatter "[$time] $prio [$loggername] $msg") <$> streamHandler stderr DEBUG
   saveGlobalLogger (setLevel DEBUG $ setHandlers [h] logger)
   token <- getEnv "TELEGRAM_BOT_TOKEN"
+  chatId <- getEnv "TELEGRAM_CHAT_ID"
   bucket <- newTokenBucket
-  let theEnv = MyEnv (Token (Text.pack token)) bucket
+  let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket
   runReaderT loadAndProcessEntries theEnv
 
 loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
