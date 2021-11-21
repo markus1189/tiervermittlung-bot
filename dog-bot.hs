@@ -1,10 +1,3 @@
-#!/usr/bin/env nix-shell
-#!nix-shell -i runhaskell
-#!nix-shell --pure
-#!nix-shell --keep TELEGRAM_BOT_TOKEN
-#!nix-shell --keep TELEGRAM_CHAT_ID
-#!nix-shell shell.nix
-
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -29,30 +22,45 @@ import           Control.Lens
     view,
     _Just,
   )
+import           Control.Lens.At (ix)
 import           Control.Lens.Operators ((<&>), (^.), (^..), (^?))
 import           Control.Lens.TH (makeClassy)
 import           Control.Monad.Catch
 import           Control.Monad.IO.Class
 import           Control.Monad.Reader
+import           Control.Retry (limitRetries, fullJitterBackoff, recoveringDynamic, RetryAction (ConsultPolicy, ConsultPolicyOverrideDelay, DontRetry))
 import           Data.Aeson
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BS
 import           Data.Foldable (for_)
+import           Data.List (find)
 import           Data.Maybe (isJust, mapMaybe, maybeToList)
 import           Data.Text (Text)
 import qualified Data.Text as Text
+import           Data.Text.Encoding (decodeUtf8)
 import qualified Data.Text.Lazy as Lazy
 import           Data.Text.Lazy.Encoding (decodeLatin1)
 import           Data.Time (Day, defaultTimeLocale, getZonedTime, localDay, parseTimeM, zonedTimeToLocalTime)
 import           Data.Traversable (for)
+import           Network.HTTP.Client
+    ( HttpException(HttpExceptionRequest),
+      HttpExceptionContent(StatusCodeException),
+      responseStatus, responseHeaders )
+import           Network.HTTP.Types.Status (Status(statusCode))
 import           Network.Wreq (responseBody)
 import qualified Network.Wreq as Wreq
+import qualified Network.Wreq.Session as Sess
 import           System.Environment (getEnv)
 import           System.FilePath ((</>))
+import           System.IO (stderr)
 import           System.IO.Temp (withSystemTempDirectory)
+import           System.Log.Formatter (simpleLogFormatter)
+import           System.Log.Handler (setFormatter)
+import           System.Log.Handler.Simple (streamHandler)
+import           System.Log.Logger (saveGlobalLogger, getRootLogger, Priority (..), setLevel, setHandlers, logM)
 import           Test.Tasty
 import           Test.Tasty.HUnit
-import qualified Text.Taggy.Lens as Taggy
+import           Text.Read (readMaybe)
 import           Text.Taggy.Lens
   ( Element,
     HasContent (contents),
@@ -62,22 +70,7 @@ import           Text.Taggy.Lens
     html,
     named,
   )
-import System.Log.Logger (saveGlobalLogger, getRootLogger, Priority (..), setLevel, setHandlers, logM)
-import Data.Text.Encoding (decodeUtf8)
-import Control.Retry (limitRetries, fullJitterBackoff, recoveringDynamic, RetryAction (ConsultPolicy, ConsultPolicyOverrideDelay, DontRetry))
-import Network.HTTP.Client
-    ( HttpException(HttpExceptionRequest),
-      HttpExceptionContent(StatusCodeException),
-      responseStatus, responseHeaders )
-import Network.HTTP.Types.Status (Status(statusCode))
-import System.Log.Handler.Simple (streamHandler)
-import System.IO (stderr)
-import System.Log.Handler (setFormatter)
-import System.Log.Formatter (simpleLogFormatter)
-import qualified Network.Wreq.Session as Sess
-import Data.List (find)
-import Text.Read (readMaybe)
-import Control.Lens.At (ix)
+import qualified Text.Taggy.Lens as Taggy
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -176,6 +169,10 @@ sendVideos (Details dUri mTitle _ videos _) = do
       liftIO $ logM "dogbot.telegram.videos" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
       telegramSendMediaGroup parts
 
+checkDetail :: Details -> Bool
+checkDetail d = maybe True (not . (\t -> any (`Text.isInfixOf` t) forbiddenKeywords) . Text.toLower) $ detailsRace d
+  where forbiddenKeywords = ["englisch setter", "bracke", "brake", "malteser", "dackel"]
+
 sendLink d = do
   chatId <- view envChatId
   liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
@@ -213,11 +210,14 @@ processEntry i (Entry _ eLink) = do
   r <- try @m @SomeException $ do
     liftIO . logM "dogbot" INFO $ "Processing link " <> show i <> ": " <> Text.unpack eLink
     d <- loadDetails eLink
-    void $ try @m @SomeException $ do
-      liftIO . logM "dogbot" INFO $ "Loaded detail: " <> show d
-      sendPics d
-      unless (null (detailsVideos d)) $ sendVideos d
-    sendLink d
+    if checkDetail d
+      then do
+        void $ try @m @SomeException $ do
+          liftIO . logM "dogbot" INFO $ "Loaded detail: " <> show d
+          sendPics d
+          unless (null (detailsVideos d)) $ sendVideos d
+        sendLink d
+      else liftIO . logM "dogbot" DEBUG $ "Skipping details: " <> show d
   case r of
     Left e -> liftIO . logM "dogbot" ERROR $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
     Right () -> liftIO . logM "dogbot" NOTICE . Text.unpack $ "Finished processing entry: " <> eLink
@@ -376,6 +376,12 @@ unitTests =
 
     , testCase "Extract picture base name" $ do
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic"
+    , testCase "Allow details without race" $ do
+        let d = Details "some-uri" Nothing [] [] Nothing
+        checkDetail d @?= True
+    , testCase "Filter out some details based on race" $ do
+        checkDetail (Details "some-uri" Nothing [] [] (Just "Mischling Bracke")) @?= False
+        checkDetail (Details "some-uri" Nothing [] [] (Just "Ein dackel-hund")) @?= False
     ]
 
 assertDetails theUri title numPics numVideos details = do
