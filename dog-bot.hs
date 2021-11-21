@@ -52,6 +52,7 @@ import           System.FilePath ((</>))
 import           System.IO.Temp (withSystemTempDirectory)
 import           Test.Tasty
 import           Test.Tasty.HUnit
+import qualified Text.Taggy.Lens as Taggy
 import           Text.Taggy.Lens
   ( Element,
     HasContent (contents),
@@ -76,6 +77,7 @@ import System.Log.Formatter (simpleLogFormatter)
 import qualified Network.Wreq.Session as Sess
 import Data.List (find)
 import Text.Read (readMaybe)
+import Control.Lens.At (ix)
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -179,10 +181,13 @@ sendLink d = do
   liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
+main :: IO ()
 main = runBot
 
 runBot :: IO ()
-runBot = do
+runBot = runStack loadAndProcessEntries
+
+runStack act = do
   logger <- getRootLogger
   h <- flip setFormatter (simpleLogFormatter "[$time] $prio [$loggername] $msg") <$> streamHandler stderr DEBUG
   saveGlobalLogger (setLevel DEBUG $ setHandlers [h] logger)
@@ -192,7 +197,7 @@ runBot = do
   s1 <- Sess.newAPISession
   s2 <- Sess.newAPISession
   let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket s1 s2
-  runReaderT loadAndProcessEntries theEnv
+  runReaderT act theEnv
 
 loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
 loadAndProcessEntries = do
@@ -209,6 +214,7 @@ processEntry i (Entry _ eLink) = do
     liftIO . logM "dogbot" INFO $ "Processing link " <> show i <> ": " <> Text.unpack eLink
     d <- loadDetails eLink
     void $ try @m @SomeException $ do
+      liftIO . logM "dogbot" INFO $ "Loaded detail: " <> show d
       sendPics d
       unless (null (detailsVideos d)) $ sendVideos d
     sendLink d
@@ -252,11 +258,9 @@ extractDetails detailUri body = Details detailUri (extractTitle body) (extractPi
     videos = extractYoutubeVideos body ++ extractEmbeddedVideos body
     race = extractRace body
 
--- ghci, (read via bytestring -> decodeLatin1 -> fromStrict)
--- lt ^.. html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item") . Text.Taggy.Lens.children . traverse
-
 extractRace :: Lazy.Text -> Maybe Text
-extractRace = const $ Just ""
+extractRace = preview (html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item") . filteredBy lfilter . Taggy.children . ix 1 . Text.Taggy.Lens.allNamed (only "h2") . Text.Taggy.Lens.contents)
+  where lfilter = Taggy.children . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_td_daten_item_1") . filteredBy (Text.Taggy.Lens.allNamed (only "strong") . Text.Taggy.Lens.contents . only "Rasse:")
 
 extractTitle :: Lazy.Text -> Maybe Text
 extractTitle = fmap Text.strip . preview (html . to universe . traverse . element . filteredBy (matchClass "Daten_Item_H1") . contents)
@@ -340,7 +344,7 @@ unitTests =
             details = extractDetails theUri input
             pics = detailsPics details
         assertDetails theUri (Just "Taya") 5 0 details
-        detailsRace details @?= Just "foo"
+        detailsRace details @?= Just "Mischling  (Mischling)"
         pics @?= [ "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551.pic"
                  , "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-1.pic"
                  , "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic"
@@ -353,6 +357,7 @@ unitTests =
         let theUri = "some-uri"
             details = extractDetails theUri input
         assertDetails theUri (Just "Carolina") 3 1 details
+        detailsRace details @?= Just "Mischling  (Mischling)"
         let video = head (detailsVideos details)
         case video of
           YoutubeVideo _ -> assertFailure "Not a direct video"
@@ -363,6 +368,7 @@ unitTests =
         let theUri = "some-uri"
             details = extractDetails theUri input
         assertDetails theUri (Just "Tilike ist sehr lieb und aktiv !") 5 1 details
+        detailsRace details @?= Just "Mischling  (Mischling)"
         let video = head (detailsVideos details)
         case video of
           YoutubeVideo u -> u @?= "https://www.youtube.com/embed/OsJmeXTq-uA?hl=de&fs=1&autoplay=0&rel=0"
