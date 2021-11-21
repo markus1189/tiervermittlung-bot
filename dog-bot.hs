@@ -67,7 +67,7 @@ import Control.Retry (limitRetries, fullJitterBackoff, recovering)
 import Network.HTTP.Client
     ( HttpException(HttpExceptionRequest),
       HttpExceptionContent(StatusCodeException),
-      responseStatus )
+      responseStatus, responseHeaders )
 import Network.HTTP.Types.Status (Status(statusCode))
 import System.Log.Handler.Simple (streamHandler)
 import System.IO (stderr)
@@ -294,6 +294,7 @@ withRetry action =
           shouldRetry = s `elem` codesToRetry || s >= 500
           body = decodeUtf8 rBody
       liftIO $ logM "dogbot.retry.http" DEBUG $ "Response body: " <> Text.unpack body
+      liftIO $ logM "dogbot.retry.http" DEBUG $ "Response headers: " <> show (responseHeaders r)
       liftIO $ if shouldRetry
         then logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s
         else logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
