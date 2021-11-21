@@ -201,12 +201,12 @@ loadAndProcessEntries = do
   telegramSendMessage chatId $ "Hunde vom " <> Text.pack (show yesterday)
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
   liftIO . logM "dogbot" INFO $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
-  for_ es processEntry
+  for_ ([1..] `zip` es) $ uncurry processEntry
 
-processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e m, HasMyEnv e) => Entry -> m ()
-processEntry (Entry _ eLink) = do
+processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e m, HasMyEnv e) => Int -> Entry -> m ()
+processEntry i (Entry _ eLink) = do
   r <- try @m @SomeException $ do
-    liftIO . logM "dogbot" INFO . Text.unpack $ "Processing link: " <> eLink
+    liftIO . logM "dogbot" INFO $ "Processing link " <> show i <> ": " <> Text.unpack eLink
     d <- loadDetails eLink
     void $ try @m @SomeException $ do
       sendPics d
