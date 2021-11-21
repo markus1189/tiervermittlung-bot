@@ -73,6 +73,7 @@ import System.Log.Handler.Simple (streamHandler)
 import System.IO (stderr)
 import System.Log.Handler (setFormatter)
 import System.Log.Formatter (simpleLogFormatter)
+import qualified Network.Wreq.Session as Sess
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -84,6 +85,8 @@ newtype ChatId = ChatId String deriving (Show, Eq, Ord)
 data MyEnv = MyEnv { _envToken :: Token
                    , _envChatId :: ChatId
                    , _envTelegramBucket :: TokenBucket
+                   , _envTelegramSession :: Sess.Session
+                   , _envTiervermittlungSession :: Sess.Session
                    }
 makeClassy ''MyEnv
 
@@ -97,14 +100,16 @@ telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => 
 telegramSendMessage (ChatId chatId) text = withRetry $ do
   waitForToken
   Token token <- view envToken
-  liftIO $ void $ Wreq.post ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMessage")
+  s <- view envTelegramSession
+  liftIO $ void $ Sess.post s ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMessage")
             (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
 
 telegramSendMediaGroup :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => [Wreq.Part] -> m ()
 telegramSendMediaGroup parts = withRetry $ do
   waitForToken
   Token token <- view envToken
-  liftIO $ void $ Wreq.post ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMediaGroup") parts
+  s <- view envTelegramSession
+  liftIO $ void $ Sess.post s ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMediaGroup") parts
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
 sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
@@ -172,7 +177,9 @@ main = do
   token <- getEnv "TELEGRAM_BOT_TOKEN"
   chatId <- getEnv "TELEGRAM_CHAT_ID"
   bucket <- newTokenBucket
-  let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket
+  s1 <- Sess.newSession
+  s2 <- Sess.newSession
+  let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket s1 s2
   runReaderT loadAndProcessEntries theEnv
 
 loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
@@ -207,10 +214,11 @@ extractLink e = e ^? to universe . traverse . filteredBy (matchId "Titel_Results
 parseDate :: Text -> Maybe Day
 parseDate = parseTimeM False defaultTimeLocale "%-d.%-m.%Y" . Text.unpack
 
-loadEntries :: (MonadIO m, MonadMask m) => m [Entry]
+loadEntries :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => m [Entry]
 loadEntries = do
+  s <- view envTiervermittlungSession
   liftIO $ logM "dogbot" DEBUG "Loading entries"
-  r <- withRetry (liftIO $ Wreq.get uri)
+  r <- withRetry (liftIO $ Sess.get s uri)
   let rBody = decodeLatin1 $ r ^. responseBody
   pure (extractEntries rBody)
 
@@ -218,9 +226,10 @@ extractEntries body =
   mapMaybe (\e -> Entry <$> (extractDate e >>= parseDate) <*> extractLink e) $
   body ^.. html . to universe . traverse . element . filtered (\n -> isJust (n ^? matchId "Item_Results"))
 
-loadDetails :: (MonadIO m, MonadMask m) => Text -> m Details
+loadDetails :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => Text -> m Details
 loadDetails detailUri = do
-  body <- withRetry (liftIO $ Wreq.get (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
+  s <- view envTiervermittlungSession
+  body <- withRetry (liftIO $ Sess.get s (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
   pure $ extractDetails detailUri body
 
 extractDetails :: Text -> Lazy.Text -> Details
@@ -251,10 +260,11 @@ matchClass = matchAttr "class"
 mediaName :: Text -> Text
 mediaName = Text.takeWhileEnd (/= '/')
 
-downloadImage :: forall m. (MonadMask m, MonadIO m) => String -> m BS.ByteString
+downloadImage :: forall m e. (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => String -> m BS.ByteString
 downloadImage theUri = do
   liftIO $ logM "dogbot.download" DEBUG $ "Downloading: " <> theUri
-  withRetry (liftIO $ Wreq.get theUri <&> view responseBody)
+  s <- view envTiervermittlungSession
+  withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
 withRetry action =
   recovering (fullJitterBackoff (round @Double 1e6) <> limitRetries 5) [const $ Handler retryStatusException] $ const action
