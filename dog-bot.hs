@@ -286,7 +286,7 @@ downloadImage theUri = do
   withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
 withRetry action =
-  recovering (fullJitterBackoff (round @Double 1e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
+  recovering (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
   where
     retryStatusException :: MonadIO m => HttpException -> m Bool
     retryStatusException (HttpExceptionRequest _ (StatusCodeException r _)) = do
