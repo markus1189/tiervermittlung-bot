@@ -63,7 +63,7 @@ import           Text.Taggy.Lens
   )
 import System.Log.Logger (saveGlobalLogger, getRootLogger, Priority (..), setLevel, setHandlers, logM)
 import Data.Text.Encoding (decodeUtf8)
-import Control.Retry (limitRetries, fullJitterBackoff, recovering)
+import Control.Retry (limitRetries, fullJitterBackoff, recoveringDynamic, RetryAction (ConsultPolicy, ConsultPolicyOverrideDelay, DontRetry))
 import Network.HTTP.Client
     ( HttpException(HttpExceptionRequest),
       HttpExceptionContent(StatusCodeException),
@@ -74,6 +74,8 @@ import System.IO (stderr)
 import System.Log.Handler (setFormatter)
 import System.Log.Formatter (simpleLogFormatter)
 import qualified Network.Wreq.Session as Sess
+import Data.List (find)
+import Text.Read (readMaybe)
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -286,20 +288,25 @@ downloadImage theUri = do
   withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
 withRetry action =
-  recovering (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
+  recoveringDynamic (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
   where
-    retryStatusException :: MonadIO m => HttpException -> m Bool
+    retryStatusException :: MonadIO m => HttpException -> m RetryAction
     retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
       let s = statusCode (responseStatus r)
           shouldRetry = s `elem` codesToRetry || s >= 500
           body = decodeUtf8 rBody
       liftIO $ logM "dogbot.retry.http" DEBUG $ "Response body: " <> Text.unpack body
       liftIO $ logM "dogbot.retry.http" DEBUG $ "Response headers: " <> show (responseHeaders r)
-      liftIO $ if shouldRetry
-        then logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s
-        else logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
-      pure shouldRetry
-    retryStatusException _ = pure False
+      let retryAfterFromHeader = (>>= readMaybe @Int) $ fmap (Text.unpack . decodeUtf8 . snd) $ find (\(k,_) -> k == "retry-after") $ responseHeaders r
+          consultPolicy = maybe ConsultPolicy (\delay -> ConsultPolicyOverrideDelay (delay * 1000 * 1000)) retryAfterFromHeader
+      if shouldRetry
+        then do
+          liftIO $ logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s <> " with policy " <> show consultPolicy
+          pure consultPolicy
+        else do
+          liftIO $ logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
+          pure DontRetry
+    retryStatusException _ = pure DontRetry
     codesToRetry = [ 429 ]
 
 
