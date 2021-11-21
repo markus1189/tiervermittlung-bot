@@ -131,32 +131,33 @@ sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
 sendVideos (Details dUri mTitle _ videos) = do
   ChatId chatId <- view envChatId
-  withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
-    liftIO . logM "dogbot.telegram.sendVideos" INFO . Text.unpack $ "Sending videos for " <> dUri <> "\n"
-    let videoNames = concatMap (\case YoutubeVideo _ -> []
-                                      DirectVideo u -> [mediaName u]) videos
-    let filteredVideos = filter (\case YoutubeVideo _ -> False
-                                       DirectVideo _ -> True) videos
-    videoParts <- for filteredVideos $ \video -> do
-      case video of
-        YoutubeVideo videoUri -> do
-          let name = mediaName videoUri
-          pure $ Wreq.partText name videoUri
-        DirectVideo videoUri -> do
-          let name = mediaName videoUri
-              fp = tmpDir </> Text.unpack name
-          dl <- downloadImage (Text.unpack videoUri)
-          _ <- liftIO $ BS.writeFile (tmpDir </> Text.unpack name) dl
-          pure $ Wreq.partFile name fp
-    let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("video" :: String)
-                                                 , "media" .= ("attach://" <> n)
-                                                 ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) videoNames
-        parts = [ Wreq.partString "chat_id" chatId
-                , Wreq.partText "disable_notification" "true"
-                , Wreq.partLBS "media" (Aeson.encode mediaJson)
-                ] ++ videoParts
-    liftIO $ logM "dogbot.telegram.videos" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
-    telegramSendMediaGroup parts
+  let filteredVideos = filter (\case YoutubeVideo _ -> False
+                                     DirectVideo _ -> True) videos
+  unless (null filteredVideos) $ do
+    withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
+      liftIO . logM "dogbot.telegram.sendVideos" INFO . Text.unpack $ "Sending videos for " <> dUri <> "\n"
+      let videoNames = concatMap (\case YoutubeVideo _ -> []
+                                        DirectVideo u -> [mediaName u]) videos
+      videoParts <- for filteredVideos $ \video -> do
+        case video of
+          YoutubeVideo videoUri -> do
+            let name = mediaName videoUri
+            pure $ Wreq.partText name videoUri
+          DirectVideo videoUri -> do
+            let name = mediaName videoUri
+                fp = tmpDir </> Text.unpack name
+            dl <- downloadImage (Text.unpack videoUri)
+            _ <- liftIO $ BS.writeFile (tmpDir </> Text.unpack name) dl
+            pure $ Wreq.partFile name fp
+      let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("video" :: String)
+                                                   , "media" .= ("attach://" <> n)
+                                                   ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) videoNames
+          parts = [ Wreq.partString "chat_id" chatId
+                  , Wreq.partText "disable_notification" "true"
+                  , Wreq.partLBS "media" (Aeson.encode mediaJson)
+                  ] ++ videoParts
+      liftIO $ logM "dogbot.telegram.videos" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
+      telegramSendMediaGroup parts
 
 sendLink d = do
   chatId <- view envChatId
@@ -178,7 +179,7 @@ loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) =
 loadAndProcessEntries = do
   yesterday <- liftIO getYesterday
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
-  liftIO . logM "dogbot" INFO $ "Processing " <> show (length es) <> " entries"
+  liftIO . logM "dogbot" INFO $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
   for_ es processEntry
 
 processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e m, HasMyEnv e) => Entry -> m ()
@@ -186,8 +187,9 @@ processEntry (Entry _ eLink) = do
   r <- try @m @SomeException $ do
     liftIO . logM "dogbot" INFO . Text.unpack $ "Processing link: " <> eLink
     d <- loadDetails eLink
-    sendPics d
-    unless (null (detailsVideos d)) $ sendVideos d
+    void $ try @m @SomeException $ do
+      sendPics d
+      unless (null (detailsVideos d)) $ sendVideos d
     sendLink d
   case r of
     Left e -> liftIO . logM "dogbot" ERROR $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
@@ -260,13 +262,13 @@ withRetry action =
     retryStatusException :: MonadIO m => HttpException -> m Bool
     retryStatusException (HttpExceptionRequest _ (StatusCodeException r _)) = do
       let s = statusCode (responseStatus r)
-          shouldRetry = s `elem` codesToRetry
+          shouldRetry = s `elem` codesToRetry || s >= 500
       liftIO $ if shouldRetry
         then logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s
         else logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
       pure shouldRetry
     retryStatusException _ = pure False
-    codesToRetry = [429]
+    codesToRetry = [ 429 ]
 
 
 waitForToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m ()
