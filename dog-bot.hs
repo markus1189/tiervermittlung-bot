@@ -177,7 +177,7 @@ sendLink d = do
   liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
-main = runTests
+main = runBot
 
 runBot :: IO ()
 runBot = do
