@@ -195,6 +195,8 @@ runBot = do
 loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
 loadAndProcessEntries = do
   yesterday <- liftIO getYesterday
+  chatId <- view envChatId
+  telegramSendMessage chatId $ "Hunde vom " <> Text.pack (show yesterday)
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
   liftIO . logM "dogbot" INFO $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
   for_ es processEntry
