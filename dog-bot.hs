@@ -92,27 +92,35 @@ makeClassy ''MyEnv
 
 data Entry = Entry {entryDay :: Day, entryLink :: Text} deriving (Show, Eq, Ord)
 
-data Details = Details {detailsUri :: Text, detailsTitle :: Maybe Text, detailsPics :: [Text], detailsVideos :: [Video]} deriving (Show, Eq, Ord)
+data Details = Details { detailsUri :: Text
+                       , detailsTitle :: Maybe Text
+                       , detailsPics :: [Text]
+                       , detailsVideos :: [Video]
+                       , detailsRace :: Maybe Text
+                       } deriving (Show, Eq, Ord)
 
 data Video = YoutubeVideo Text | DirectVideo Text deriving (Show, Eq, Ord)
 
 telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => ChatId -> Text -> m ()
-telegramSendMessage (ChatId chatId) text = withRetry $ do
-  waitForToken
-  Token token <- view envToken
+telegramSendMessage (ChatId chatId) text = withRetry . withToken $ do
   s <- view envTelegramSession
-  liftIO $ void $ Sess.post s ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMessage")
+  theUri <- buildTelegramUri "sendMessage"
+  liftIO $ void $ Sess.post s theUri
             (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
 
 telegramSendMediaGroup :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => [Wreq.Part] -> m ()
-telegramSendMediaGroup parts = withRetry $ do
-  waitForToken
-  Token token <- view envToken
+telegramSendMediaGroup parts = withRetry . withToken $ do
   s <- view envTelegramSession
-  liftIO $ void $ Sess.post s ("https://api.telegram.org/bot" <> Text.unpack token <> "/sendMediaGroup") parts
+  theUri <- buildTelegramUri "sendMediaGroup"
+  liftIO $ void $ Sess.post s theUri parts
+
+buildTelegramUri :: (MonadReader e m, HasMyEnv e) => String -> m String
+buildTelegramUri op = do
+  Token token <- view envToken
+  pure $ "https://api.telegram.org/bot" <> Text.unpack token <> "/" <> op
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
+sendPics (Details dUri mTitle pics _ _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
   ChatId chatId <- view envChatId
   liftIO . logM "dogbot.telegram.sendPics" INFO . Text.unpack $ "Sending pictures for " <> dUri
   picParts <- for pics $ \pic -> do
@@ -134,7 +142,7 @@ sendPics (Details dUri mTitle pics _) = withSystemTempDirectory "tiervermittlung
   telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendVideos (Details dUri mTitle _ videos) = do
+sendVideos (Details dUri mTitle _ videos _) = do
   ChatId chatId <- view envChatId
   let filteredVideos = filter (\case YoutubeVideo _ -> False
                                      DirectVideo _ -> True) videos
@@ -169,8 +177,10 @@ sendLink d = do
   liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
-main :: IO ()
-main = do
+main = runTests
+
+runBot :: IO ()
+runBot = do
   logger <- getRootLogger
   h <- flip setFormatter (simpleLogFormatter "[$time] $prio [$loggername] $msg") <$> streamHandler stderr DEBUG
   saveGlobalLogger (setLevel DEBUG $ setHandlers [h] logger)
@@ -233,9 +243,16 @@ loadDetails detailUri = do
   pure $ extractDetails detailUri body
 
 extractDetails :: Text -> Lazy.Text -> Details
-extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos
+extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos race
   where
     videos = extractYoutubeVideos body ++ extractEmbeddedVideos body
+    race = extractRace body
+
+-- ghci, (read via bytestring -> decodeLatin1 -> fromStrict)
+-- lt ^.. html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item") . Text.Taggy.Lens.children . traverse
+
+extractRace :: Lazy.Text -> Maybe Text
+extractRace = const $ Just ""
 
 extractTitle :: Lazy.Text -> Maybe Text
 extractTitle = fmap Text.strip . preview (html . to universe . traverse . element . filteredBy (matchClass "Daten_Item_H1") . contents)
@@ -311,6 +328,7 @@ unitTests =
             details = extractDetails theUri input
             pics = detailsPics details
         assertDetails theUri (Just "Taya") 5 0 details
+        detailsRace details @?= Just "foo"
         pics @?= [ "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551.pic"
                  , "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-1.pic"
                  , "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic"
