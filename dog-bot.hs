@@ -289,9 +289,11 @@ withRetry action =
   recovering (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
   where
     retryStatusException :: MonadIO m => HttpException -> m Bool
-    retryStatusException (HttpExceptionRequest _ (StatusCodeException r _)) = do
+    retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
       let s = statusCode (responseStatus r)
           shouldRetry = s `elem` codesToRetry || s >= 500
+          body = decodeUtf8 rBody
+      liftIO $ logM "dogbot.retry.http" DEBUG $ "Response body: " <> Text.unpack body
       liftIO $ if shouldRetry
         then logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s
         else logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
