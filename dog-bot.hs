@@ -281,12 +281,13 @@ withRetry action =
     codesToRetry = [ 429 ]
 
 
-waitForToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m ()
-waitForToken = do
+withToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m a -> m a
+withToken action = do
   bucket <- view envTelegramBucket
   liftIO $ tokenBucketWait bucket burstSize inverseRate
+  action
   where burstSize = 1
-        inverseRate = round @Double 3e6
+        inverseRate = round @Double 5e6
 
 -- Tests
 
