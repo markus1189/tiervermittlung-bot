@@ -177,8 +177,8 @@ main = do
   token <- getEnv "TELEGRAM_BOT_TOKEN"
   chatId <- getEnv "TELEGRAM_CHAT_ID"
   bucket <- newTokenBucket
-  s1 <- Sess.newSession
-  s2 <- Sess.newSession
+  s1 <- Sess.newAPISession
+  s2 <- Sess.newAPISession
   let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket s1 s2
   runReaderT loadAndProcessEntries theEnv
 
