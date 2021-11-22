@@ -52,12 +52,7 @@ import qualified Network.Wreq as Wreq
 import qualified Network.Wreq.Session as Sess
 import           System.Environment (getEnv)
 import           System.FilePath ((</>))
-import           System.IO (stderr)
 import           System.IO.Temp (withSystemTempDirectory)
-import           System.Log.Formatter (simpleLogFormatter)
-import           System.Log.Handler (setFormatter)
-import           System.Log.Handler.Simple (streamHandler)
-import           System.Log.Logger (saveGlobalLogger, getRootLogger, Priority (..), setLevel, setHandlers, logM)
 import           Test.Tasty
 import           Test.Tasty.HUnit
 import           Text.Read (readMaybe)
@@ -71,6 +66,8 @@ import           Text.Taggy.Lens
     named,
   )
 import qualified Text.Taggy.Lens as Taggy
+import qualified Control.Logging as Logging
+import Control.Logging (LogLevel(..), withStderrLogging, setLogTimeFormat)
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -119,7 +116,7 @@ buildTelegramUri op = do
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
 sendPics (Details dUri mTitle pics _ _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
   ChatId chatId <- view envChatId
-  liftIO . logM "dogbot.telegram.sendPics" INFO . Text.unpack $ "Sending pictures for " <> dUri
+  liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendPics" . Text.unpack $ "Sending pictures for " <> dUri
   picParts <- for pics $ \pic -> do
     let name = mediaName pic
         fp = tmpDir </> Text.unpack name
@@ -134,8 +131,8 @@ sendPics (Details dUri mTitle pics _ _) = withSystemTempDirectory "tiervermittlu
               , Wreq.partLBS "media" (Aeson.encode mediaJson)
               ] ++ picParts
   liftIO $ do
-    logM "dogbot.telegram.pics" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
-    logM "dogbot.telegram.pics" DEBUG ("Number of parts: " <> show (length parts))
+    Logging.loggingLogger LevelDebug "dogbot.telegram.pics" (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
+    Logging.loggingLogger LevelDebug "dogbot.telegram.pics" ("Number of parts: " <> show (length parts))
   telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
@@ -145,7 +142,7 @@ sendVideos (Details dUri mTitle _ videos _) = do
                                      DirectVideo _ -> True) videos
   unless (null filteredVideos) $ do
     withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
-      liftIO . logM "dogbot.telegram.sendVideos" INFO . Text.unpack $ "Sending videos for " <> dUri <> "\n"
+      liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendVideos" . Text.unpack $ "Sending videos for " <> dUri <> "\n"
       let videoNames = concatMap (\case YoutubeVideo _ -> []
                                         DirectVideo u -> [mediaName u]) videos
       videoParts <- for filteredVideos $ \video -> do
@@ -166,7 +163,7 @@ sendVideos (Details dUri mTitle _ videos _) = do
                   , Wreq.partText "disable_notification" "true"
                   , Wreq.partLBS "media" (Aeson.encode mediaJson)
                   ] ++ videoParts
-      liftIO $ logM "dogbot.telegram.videos" DEBUG (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
+      liftIO $ Logging.loggingLogger LevelDebug "dogbot.telegram.videos" (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
       telegramSendMediaGroup parts
 
 checkDetail :: Details -> Bool
@@ -175,7 +172,7 @@ checkDetail d = maybe True (not . (\t -> any (`Text.isInfixOf` t) forbiddenKeywo
 
 sendLink d = do
   chatId <- view envChatId
-  liftIO . logM "dogbot.telegram.sendLink" INFO . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
+  liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendLink" . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
 main :: IO ()
@@ -184,10 +181,8 @@ main = runBot
 runBot :: IO ()
 runBot = runStack loadAndProcessEntries
 
-runStack act = do
-  logger <- getRootLogger
-  h <- flip setFormatter (simpleLogFormatter "[$time] $prio [$loggername] $msg") <$> streamHandler stderr DEBUG
-  saveGlobalLogger (setLevel DEBUG $ setHandlers [h] logger)
+runStack act = withStderrLogging $ do
+  setLogTimeFormat "%c"
   token <- getEnv "TELEGRAM_BOT_TOKEN"
   chatId <- getEnv "TELEGRAM_CHAT_ID"
   bucket <- newTokenBucket
@@ -202,25 +197,25 @@ loadAndProcessEntries = do
   chatId <- view envChatId
   telegramSendMessage chatId $ "Hunde vom " <> Text.pack (show yesterday)
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
-  liftIO . logM "dogbot" INFO $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
+  liftIO . Logging.loggingLogger LevelInfo "dogbot" $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
   for_ ([1..] `zip` es) $ uncurry processEntry
 
 processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e m, HasMyEnv e) => Int -> Entry -> m ()
 processEntry i (Entry _ eLink) = do
   r <- try @m @SomeException $ do
-    liftIO . logM "dogbot" INFO $ "Processing link " <> show i <> ": " <> Text.unpack eLink
+    liftIO . Logging.loggingLogger LevelInfo "dogbot" $ "Processing link " <> show i <> ": " <> Text.unpack eLink
     d <- loadDetails eLink
     if checkDetail d
       then do
         void $ try @m @SomeException $ do
-          liftIO . logM "dogbot" INFO $ "Loaded detail: " <> show d
+          liftIO . Logging.loggingLogger LevelInfo "dogbot" $ "Loaded detail: " <> show d
           sendPics d
           unless (null (detailsVideos d)) $ sendVideos d
         sendLink d
-      else liftIO . logM "dogbot" DEBUG $ "Skipping details: " <> show d
+      else liftIO . Logging.loggingLogger LevelDebug "dogbot" $ "Skipping details: " <> show d
   case r of
-    Left e -> liftIO . logM "dogbot" ERROR $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
-    Right () -> liftIO . logM "dogbot" NOTICE . Text.unpack $ "Finished processing entry: " <> eLink
+    Left e -> liftIO . Logging.loggingLogger LevelError "dogbot" $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
+    Right () -> liftIO . Logging.loggingLogger LevelInfo "dogbot" . Text.unpack $ "Finished processing entry: " <> eLink
 
 getYesterday :: IO Day
 getYesterday = pred . localDay . zonedTimeToLocalTime <$> getZonedTime
@@ -237,7 +232,7 @@ parseDate = parseTimeM False defaultTimeLocale "%-d.%-m.%Y" . Text.unpack
 loadEntries :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => m [Entry]
 loadEntries = do
   s <- view envTiervermittlungSession
-  liftIO $ logM "dogbot" DEBUG "Loading entries"
+  liftIO $ Logging.loggingLogger @Text LevelDebug "dogbot" "Loading entries"
   r <- withRetry (liftIO $ Sess.get s uri)
   let rBody = decodeLatin1 $ r ^. responseBody
   pure (extractEntries rBody)
@@ -287,7 +282,7 @@ mediaName = Text.takeWhileEnd (/= '/')
 
 downloadImage :: forall m e. (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => String -> m BS.ByteString
 downloadImage theUri = do
-  liftIO $ logM "dogbot.download" DEBUG $ "Downloading: " <> theUri
+  liftIO $ Logging.loggingLogger LevelDebug "dogbot.download" $ "Downloading: " <> theUri
   s <- view envTiervermittlungSession
   withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
@@ -299,16 +294,16 @@ withRetry action =
       let s = statusCode (responseStatus r)
           shouldRetry = s `elem` codesToRetry || s >= 500
           body = decodeUtf8 rBody
-      liftIO $ logM "dogbot.retry.http" DEBUG $ "Response body: " <> Text.unpack body
-      liftIO $ logM "dogbot.retry.http" DEBUG $ "Response headers: " <> show (responseHeaders r)
+      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response body: " <> Text.unpack body
+      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response headers: " <> show (responseHeaders r)
       let retryAfterFromHeader = (>>= readMaybe @Int) $ fmap (Text.unpack . decodeUtf8 . snd) $ find (\(k,_) -> k == "retry-after") $ responseHeaders r
           consultPolicy = maybe ConsultPolicy (\delay -> ConsultPolicyOverrideDelay (delay * 1000 * 1000)) retryAfterFromHeader
       if shouldRetry
         then do
-          liftIO $ logM "dogbot.retry.http" DEBUG $ "Retrying after status " <> show s <> " with policy " <> show consultPolicy
+          liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Retrying after status " <> show s <> " with policy " <> show consultPolicy
           pure consultPolicy
         else do
-          liftIO $ logM "dogbot.retry.http" DEBUG $ "NOT retrying after status " <> show s
+          liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "NOT retrying after status " <> show s
           pure DontRetry
     retryStatusException _ = pure DontRetry
     codesToRetry = [ 429 ]

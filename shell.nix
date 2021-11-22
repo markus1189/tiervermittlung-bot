@@ -3,7 +3,7 @@
 let
   hsPkgs = pkgs.haskellPackages.ghcWithPackages (p:
     with p; [
-      hslogger
+      logging
       wreq
       lens
       rio
