@@ -170,6 +170,7 @@ checkDetail :: Details -> Bool
 checkDetail d = maybe True (not . (\t -> any (`Text.isInfixOf` t) forbiddenKeywords) . Text.toLower) $ detailsRace d
   where forbiddenKeywords = ["englisch setter", "bracke", "brake", "malteser", "dackel"]
 
+sendLink :: (MonadReader e m, MonadIO m, HasMyEnv e, MonadMask m) => Details -> m ()
 sendLink d = do
   chatId <- view envChatId
   liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendLink" . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
@@ -181,6 +182,7 @@ main = runBot
 runBot :: IO ()
 runBot = runStack loadAndProcessEntries
 
+runStack :: ReaderT MyEnv IO a -> IO a
 runStack act = withStderrLogging $ do
   setLogTimeFormat "%c"
   token <- getEnv "TELEGRAM_BOT_TOKEN"
@@ -269,6 +271,7 @@ extractYoutubeVideos = map YoutubeVideo . toListOf (html . to universe . travers
 extractEmbeddedVideos :: Lazy.Text -> [Video]
 extractEmbeddedVideos = map DirectVideo . toListOf (html . to universe . traverse . element . named (only "video") . attr "src" . _Just)
 
+matchAttr :: Applicative f => Text -> Text -> (() -> f ()) -> Element -> f Element
 matchAttr attrName given = attr attrName . _Just . only given
 
 matchId :: Applicative f => Text -> (() -> f ()) -> Element -> f Element
@@ -286,6 +289,7 @@ downloadImage theUri = do
   s <- view envTiervermittlungSession
   withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
+withRetry :: (MonadIO m, MonadMask m) => m a -> m a
 withRetry action =
   recoveringDynamic (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
   where
@@ -325,6 +329,7 @@ runTests = defaultMain tests
 tests :: TestTree
 tests = testGroup "Tests" [unitTests]
 
+unitTests :: TestTree
 unitTests =
   testGroup
     "Unit tests"
@@ -379,6 +384,7 @@ unitTests =
         checkDetail (Details "some-uri" Nothing [] [] (Just "Ein dackel-hund")) @?= False
     ]
 
+assertDetails :: Text -> Maybe Text -> Int -> Int -> Details -> IO ()
 assertDetails theUri title numPics numVideos details = do
         detailsUri details @?= theUri
         detailsTitle details @?= title
