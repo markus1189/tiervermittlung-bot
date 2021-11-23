@@ -3,6 +3,8 @@
 let
   hsPkgs = pkgs.haskellPackages.ghcWithPackages (p:
     with p; [
+      lens-aeson
+      either
       logging
       wreq
       lens
@@ -17,6 +19,7 @@ let
       tasty-hspec
       temporary
       token-bucket
+      unordered-containers
     ]);
 
 in pkgs.mkShell {

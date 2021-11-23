@@ -32,15 +32,22 @@ import           Control.Lens
 import           Control.Lens.At (ix)
 import           Control.Lens.Operators ((<&>), (^.), (^..), (^?))
 import           Control.Lens.TH (makeClassy)
-import           Control.Monad.Catch
-import           Control.Monad.IO.Class
-import           Control.Monad.Reader
+import           Control.Logging (LogLevel(..), withStderrLogging, setLogTimeFormat)
+import qualified Control.Logging as Logging
+import Control.Monad.Catch
+    ( try, Handler(Handler), SomeException, MonadCatch, MonadMask )
+import Control.Monad.IO.Class ( MonadIO(..) )
+import Control.Monad.Reader
+    ( unless, void, ReaderT(runReaderT), MonadReader )
 import           Control.Retry (limitRetries, fullJitterBackoff, recoveringDynamic, RetryAction (ConsultPolicy, ConsultPolicyOverrideDelay, DontRetry))
-import           Data.Aeson
+import Data.Aeson ( object, KeyValue((.=)), ToJSON(toJSON) )
 import qualified Data.Aeson as Aeson
+import           Data.Aeson.Lens (_String, key)
 import qualified Data.ByteString.Lazy as BS
 import           Data.Foldable (for_)
 import           Data.List (find)
+import           Data.Map (Map)
+import qualified Data.Map as Map
 import           Data.Maybe (isJust, mapMaybe, maybeToList)
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -60,8 +67,8 @@ import qualified Network.Wreq.Session as Sess
 import           System.Environment (getEnv)
 import           System.FilePath ((</>))
 import           System.IO.Temp (withSystemTempDirectory)
-import           Test.Tasty
-import           Test.Tasty.HUnit
+import Test.Tasty ( testGroup, defaultMain, TestTree )
+import Test.Tasty.HUnit ( assertFailure, (@?=), testCase )
 import           Text.Read (readMaybe)
 import           Text.Taggy.Lens
   ( Element,
@@ -73,10 +80,6 @@ import           Text.Taggy.Lens
     named,
   )
 import qualified Text.Taggy.Lens as Taggy
-import qualified Control.Logging as Logging
-import Control.Logging (LogLevel(..), withStderrLogging, setLogTimeFormat)
-import qualified Data.Map as Map
-import Data.Map (Map)
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -305,27 +308,34 @@ downloadImage theUri = do
 
 withRetry :: (MonadIO m, MonadMask m) => m a -> m a
 withRetry action =
-  recoveringDynamic (fullJitterBackoff (round @Double 2e6) <> limitRetries 10) [const $ Handler retryStatusException] $ const action
-  where
-    retryStatusException :: MonadIO m => HttpException -> m RetryAction
-    retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
-      let s = statusCode (responseStatus r)
-          shouldRetry = s `elem` codesToRetry || s >= 500
-          body = decodeUtf8 rBody
-      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response body: " <> Text.unpack body
-      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response headers: " <> show (responseHeaders r)
-      let retryAfterFromHeader = (>>= readMaybe @Int) $ fmap (Text.unpack . decodeUtf8 . snd) $ find (\(k,_) -> k == "retry-after") $ responseHeaders r
-          consultPolicy = maybe ConsultPolicy (\delay -> ConsultPolicyOverrideDelay (delay * 1000 * 1000)) retryAfterFromHeader
-      if shouldRetry
-        then do
-          liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Retrying after status " <> show s <> " with policy " <> show consultPolicy
-          pure consultPolicy
-        else do
-          liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "NOT retrying after status " <> show s
-          pure DontRetry
-    retryStatusException _ = pure DontRetry
-    codesToRetry = [ 429 ]
+  recoveringDynamic (fullJitterBackoff (round @Double 1e6) <> limitRetries 5) [const $ Handler retryStatusException] $ const action
 
+retryStatusException :: MonadIO m => HttpException -> m RetryAction
+retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
+  let s = statusCode (responseStatus r)
+      body = decodeUtf8 rBody
+      retryAfterFromHeader = (>>= readMaybe @Int) $ fmap (Text.unpack . decodeUtf8 . snd) $ find (\(k,_) -> k == "retry-after") $ responseHeaders r
+      consultPolicy = maybe ConsultPolicy (\delay -> ConsultPolicyOverrideDelay (delay * 1000 * 1000)) retryAfterFromHeader
+      description = body ^? key "description" . _String
+      shouldRetry = s `elem` codesToRetry || s >= 500 || maybe False (`elem` descriptionsToRetry) description
+  liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response body: " <> body
+  liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Response headers: " <> show (responseHeaders r)
+  if shouldRetry
+    then do
+      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Retrying after status " <> show s <> " with policy " <> show consultPolicy
+      pure consultPolicy
+    else do
+      liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "NOT retrying after status " <> show s
+      pure DontRetry
+  where
+    codesToRetry = [ 400
+                   , 429
+                   ]
+    descriptionsToRetry = [ "Bad Request: group send failed"
+                          ]
+retryStatusException e = do
+  liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Not retrying unknown exception: " <> show e
+  pure DontRetry
 
 withToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m a -> m a
 withToken action = do
