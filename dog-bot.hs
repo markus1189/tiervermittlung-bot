@@ -1,3 +1,10 @@
+#!/usr/bin/env nix-shell
+#!nix-shell -i runhaskell
+#!nix-shell --pure
+#!nix-shell --keep TELEGRAM_BOT_TOKEN
+#!nix-shell --keep TELEGRAM_CHAT_ID
+#!nix-shell shell.nix
+
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
