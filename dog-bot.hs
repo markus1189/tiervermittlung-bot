@@ -45,7 +45,7 @@ import qualified Data.Aeson as Aeson
 import           Data.Aeson.Lens (_String, key)
 import qualified Data.ByteString.Lazy as BS
 import           Data.Foldable (for_)
-import           Data.List (find)
+import Data.List ( find, partition )
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (isJust, mapMaybe, maybeToList)
@@ -127,38 +127,45 @@ buildTelegramUri op = do
   pure $ "https://api.telegram.org/bot" <> Text.unpack token <> "/" <> op
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendPics (Details dUri mTitle pics _ _ _) = withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
-  ChatId chatId <- view envChatId
-  liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendPics" . Text.unpack $ "Sending pictures for " <> dUri
-  picParts <- for pics $ \pic -> do
-    let name = mediaName pic
-        fp = tmpDir </> Text.unpack name
-    dl <- downloadImage (Text.unpack pic)
-    _ <- liftIO $ BS.writeFile (tmpDir </> Text.unpack name) dl
-    pure $ Wreq.partFile name fp
-  let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("photo" :: String)
-                                               , "media" .= ("attach://" <> n)
-                                               ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) pics
-      parts = [ Wreq.partString "chat_id" chatId
-              , Wreq.partText "disable_notification" "true"
-              , Wreq.partLBS "media" (Aeson.encode mediaJson)
-              ] ++ picParts
-  liftIO $ do
-    Logging.loggingLogger LevelDebug "dogbot.telegram.pics" (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
-    Logging.loggingLogger LevelDebug "dogbot.telegram.pics" ("Number of parts: " <> show (length parts))
-  telegramSendMediaGroup parts
+sendPics (Details dUri mTitle pics _ _ _) =
+  unless (null pics) $
+    withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
+    ChatId chatId <- view envChatId
+    liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendPics" . Text.unpack $ "Sending pictures for " <> dUri
+    picParts <- for pics $ \pic -> do
+      let name = mediaName pic
+          fp = tmpDir </> Text.unpack name
+      dl <- downloadImage (Text.unpack pic)
+      _ <- liftIO $ BS.writeFile (tmpDir </> Text.unpack name) dl
+      pure $ Wreq.partFile name fp
+    let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("photo" :: String)
+                                                 , "media" .= ("attach://" <> n)
+                                                 ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) pics
+        parts = [ Wreq.partString "chat_id" chatId
+                , Wreq.partText "disable_notification" "true"
+                , Wreq.partLBS "media" (Aeson.encode mediaJson)
+                ] ++ picParts
+    liftIO $ do
+      Logging.loggingLogger LevelDebug "dogbot.telegram.pics" (Text.unpack (decodeUtf8 (BS.toStrict (Aeson.encode mediaJson))))
+      Logging.loggingLogger LevelDebug "dogbot.telegram.pics" ("Number of parts: " <> show (length parts))
+    telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
 sendVideos (Details dUri mTitle _ videos _ _) = do
   ChatId chatId <- view envChatId
-  let filteredVideos = filter (\case YoutubeVideo _ -> False
-                                     DirectVideo _ -> True) videos
-  unless (null filteredVideos) $ do
+  let (directVideos, youtubeVideos) =
+        partition (\case YoutubeVideo _ -> False
+                         DirectVideo _ -> True) videos
+  for_ youtubeVideos $ \case YoutubeVideo theUri -> do
+                               telegramSendMessage (ChatId chatId) (maybe "" (<> ": ") mTitle <> theUri)
+                             DirectVideo _ -> pure ()
+
+  unless (null directVideos) $ do
     withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
       liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendVideos" . Text.unpack $ "Sending videos for " <> dUri <> "\n"
       let videoNames = concatMap (\case YoutubeVideo _ -> []
                                         DirectVideo u -> [mediaName u]) videos
-      videoParts <- for filteredVideos $ \video -> do
+      videoParts <- for directVideos $ \video -> do
         case video of
           YoutubeVideo videoUri -> do
             let name = mediaName videoUri
@@ -185,8 +192,8 @@ checkDetail d = maybe True (not . (\t -> any (`Text.isInfixOf` t) forbiddenKeywo
 
 sendLink :: (MonadReader e m, MonadIO m, HasMyEnv e, MonadMask m) => Details -> m ()
 sendLink d = do
-  chatId <- view envChatId
   liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendLink" . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
+  chatId <- view envChatId
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
 main :: IO ()
@@ -219,7 +226,7 @@ processEntry :: forall m e. (MonadIO m, MonadCatch m, MonadMask m, MonadReader e
 processEntry i (Entry _ eLink) = do
   r <- try @m @SomeException $ do
     liftIO . Logging.loggingLogger LevelInfo "dogbot" $ "Processing link " <> show i <> ": " <> Text.unpack eLink
-    d <- loadDetails eLink
+    d <- loadDetailsAndExtract eLink
     if checkDetail d
       then do
         void $ try @m @SomeException $ do
@@ -256,8 +263,12 @@ extractEntries body =
   mapMaybe (\e -> Entry <$> (extractDate e >>= parseDate) <*> extractLink e) $
   body ^.. html . to universe . traverse . element . filtered (\n -> isJust (n ^? matchId "Item_Results"))
 
-loadDetails :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => Text -> m Details
 loadDetails detailUri = do
+  s <- view envTiervermittlungSession
+  withRetry (liftIO $ Sess.get s (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
+
+loadDetailsAndExtract :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => Text -> m Details
+loadDetailsAndExtract detailUri = do
   s <- view envTiervermittlungSession
   body <- withRetry (liftIO $ Sess.get s (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
   pure $ extractDetails detailUri body
@@ -328,8 +339,7 @@ retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
       liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "NOT retrying after status " <> show s
       pure DontRetry
   where
-    codesToRetry = [ 400
-                   , 429
+    codesToRetry = [ 429
                    ]
     descriptionsToRetry = [ "Bad Request: group send failed"
                           ]
