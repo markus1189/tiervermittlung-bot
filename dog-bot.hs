@@ -103,6 +103,7 @@ data Details = Details { detailsUri :: Text
                        , detailsPics :: [Text]
                        , detailsVideos :: [Video]
                        , detailsProfile :: Map Text Text
+                       , detailsAttributes :: Maybe Text
                        } deriving (Show, Eq, Ord)
 
 detailsRace :: Details -> Maybe Text
@@ -132,12 +133,12 @@ buildTelegramUri op = do
   pure $ "https://api.telegram.org/bot" <> Text.unpack token <> "/" <> op
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendPics (Details dUri mTitle pics _ _) =
-  unless (null pics) $
+sendPics d =
+  unless (null (detailsPics d)) $
     withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
     ChatId chatId <- view envChatId
-    liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendPics" . Text.unpack $ "Sending pictures for " <> dUri
-    picParts <- for pics $ \pic -> do
+    liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendPics" . Text.unpack $ "Sending pictures for " <> detailsUri d
+    picParts <- for (detailsPics d) $ \pic -> do
       let name = mediaName pic
           fp = tmpDir </> Text.unpack name
       dl <- downloadImage (Text.unpack pic)
@@ -145,7 +146,7 @@ sendPics (Details dUri mTitle pics _ _) =
       pure $ Wreq.partFile name fp
     let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("photo" :: String)
                                                  , "media" .= ("attach://" <> n)
-                                                 ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) pics
+                                                 ] ++ map ("caption" .=) (maybeToList (detailsTitle d)))) . mediaName) (detailsPics d)
         parts = [ Wreq.partString "chat_id" chatId
                 , Wreq.partText "disable_notification" "true"
                 , Wreq.partLBS "media" (Aeson.encode mediaJson)
@@ -156,20 +157,20 @@ sendPics (Details dUri mTitle pics _ _) =
     telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendVideos (Details dUri mTitle _ videos _) = do
+sendVideos d = do
   ChatId chatId <- view envChatId
   let (directVideos, youtubeVideos) =
         partition (\case YoutubeVideo _ -> False
-                         DirectVideo _ -> True) videos
+                         DirectVideo _ -> True) (detailsVideos d)
   for_ youtubeVideos $ \case YoutubeVideo theUri -> do
-                               telegramSendMessage (ChatId chatId) (maybe "" (<> ": ") mTitle <> theUri)
+                               telegramSendMessage (ChatId chatId) (maybe "" (<> ": ") (detailsTitle d) <> theUri)
                              DirectVideo _ -> pure ()
 
   unless (null directVideos) $ do
     withSystemTempDirectory "tiervermittlung-videos" $ \tmpDir -> do
-      liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendVideos" . Text.unpack $ "Sending videos for " <> dUri <> "\n"
+      liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendVideos" . Text.unpack $ "Sending videos for " <> detailsUri d <> "\n"
       let videoNames = concatMap (\case YoutubeVideo _ -> []
-                                        DirectVideo u -> [mediaName u]) videos
+                                        DirectVideo u -> [mediaName u]) (detailsVideos d)
       videoParts <- for directVideos $ \video -> do
         case video of
           YoutubeVideo videoUri -> do
@@ -183,7 +184,7 @@ sendVideos (Details dUri mTitle _ videos _) = do
             pure $ Wreq.partFile name fp
       let mediaJson = toJSON $ map ((\n -> object ([ "type" .= ("video" :: String)
                                                    , "media" .= ("attach://" <> n)
-                                                   ] ++ map ("caption" .=) (maybeToList mTitle))) . mediaName) videoNames
+                                                   ] ++ map ("caption" .=) (maybeToList (detailsTitle d)))) . mediaName) videoNames
           parts = [ Wreq.partString "chat_id" chatId
                   , Wreq.partText "disable_notification" "true"
                   , Wreq.partLBS "media" (Aeson.encode mediaJson)
@@ -279,10 +280,11 @@ loadDetailsAndExtract detailUri = do
   pure $ extractDetails detailUri body
 
 extractDetails :: Text -> Lazy.Text -> Details
-extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos attrs
+extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos profile attributes
   where
     videos = extractYoutubeVideos body ++ extractEmbeddedVideos body
-    attrs = extractProfileAttrs body
+    profile = extractProfileAttrs body
+    attributes = extractAttributes body
 
 extractProfileAttrs = Map.fromList . mapMaybe (\row -> (,) <$> getRowKey row <*> (getRowValue1 row <|> getRowValue2 row)) . getRows
   where getRows = toListOf (html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item"))
@@ -290,6 +292,7 @@ extractProfileAttrs = Map.fromList . mapMaybe (\row -> (,) <$> getRowKey row <*>
         getRowValue1 = fmap (Text.dropWhileEnd (== ':')) . preview (to universe . traverse . filteredBy (matchClass "table_td_daten_item_2") . Taggy.children . traverse . Taggy.contents)
         getRowValue2 = fmap (Text.dropWhileEnd (== ':')) . preview (to universe . traverse . filteredBy (matchClass "table_td_daten_item_2") . Taggy.contents)
 
+extractAttributes = fmap Text.strip . preview (html . to universe . traverse . element . filteredBy (matchId "Eigenschaften_Item") . contents)
 
 extractTitle :: Lazy.Text -> Maybe Text
 extractTitle = fmap Text.strip . preview (html . to universe . traverse . element . filteredBy (matchClass "Daten_Item_H1") . contents)
@@ -415,11 +418,11 @@ unitTests =
     , testCase "Extract picture base name" $ do
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic"
     , testCase "Allow details without race" $ do
-        let d = Details "some-uri" Nothing [] [] Map.empty
+        let d = Details "some-uri" Nothing [] [] Map.empty Nothing
         checkDetail d @?= True
     , testCase "Filter out some details based on race" $ do
-        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Mischling Bracke")])) @?= False
-        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Ein dackel-hund")])) @?= False
+        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Mischling Bracke")]) Nothing) @?= False
+        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Ein dackel-hund")]) Nothing) @?= False
     ]
 
 assertDetails :: Text -> Maybe Text -> Int -> Int -> Details -> IO ()
