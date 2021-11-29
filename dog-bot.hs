@@ -29,7 +29,6 @@ import           Control.Lens
     view,
     _Just,
   )
-import           Control.Lens.At (ix)
 import           Control.Lens.Operators ((<&>), (^.), (^..), (^?))
 import           Control.Lens.TH (makeClassy)
 import           Control.Logging (LogLevel(..), withStderrLogging, setLogTimeFormat)
@@ -80,6 +79,7 @@ import           Text.Taggy.Lens
     named,
   )
 import qualified Text.Taggy.Lens as Taggy
+import Control.Applicative (Alternative((<|>)))
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -102,9 +102,14 @@ data Details = Details { detailsUri :: Text
                        , detailsTitle :: Maybe Text
                        , detailsPics :: [Text]
                        , detailsVideos :: [Video]
-                       , detailsRace :: Maybe Text
                        , detailsProfile :: Map Text Text
                        } deriving (Show, Eq, Ord)
+
+detailsRace :: Details -> Maybe Text
+detailsRace = Map.lookup "Rasse" . detailsProfile
+
+detailsAge :: Details -> Maybe Text
+detailsAge = Map.lookup "Alter" . detailsProfile
 
 data Video = YoutubeVideo Text | DirectVideo Text deriving (Show, Eq, Ord)
 
@@ -127,7 +132,7 @@ buildTelegramUri op = do
   pure $ "https://api.telegram.org/bot" <> Text.unpack token <> "/" <> op
 
 sendPics :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendPics (Details dUri mTitle pics _ _ _) =
+sendPics (Details dUri mTitle pics _ _) =
   unless (null pics) $
     withSystemTempDirectory "tiervermittlung-photos" $ \tmpDir -> do
     ChatId chatId <- view envChatId
@@ -151,7 +156,7 @@ sendPics (Details dUri mTitle pics _ _ _) =
     telegramSendMediaGroup parts
 
 sendVideos :: (MonadMask m, MonadIO m, MonadReader e m, HasMyEnv e) => Details -> m ()
-sendVideos (Details dUri mTitle _ videos _ _) = do
+sendVideos (Details dUri mTitle _ videos _) = do
   ChatId chatId <- view envChatId
   let (directVideos, youtubeVideos) =
         partition (\case YoutubeVideo _ -> False
@@ -274,18 +279,17 @@ loadDetailsAndExtract detailUri = do
   pure $ extractDetails detailUri body
 
 extractDetails :: Text -> Lazy.Text -> Details
-extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos race attrs
+extractDetails detailUri body = Details detailUri (extractTitle body) (extractPics body) videos attrs
   where
     videos = extractYoutubeVideos body ++ extractEmbeddedVideos body
-    race = extractRace body
-    attrs = Map.empty -- extractProfileAttrs body
+    attrs = extractProfileAttrs body
 
-extractRace :: Lazy.Text -> Maybe Text
-extractRace = preview (html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item") . filteredBy lfilter . Taggy.children . ix 1 . Text.Taggy.Lens.allNamed (only "h2") . Text.Taggy.Lens.contents)
-  where lfilter = Taggy.children . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_td_daten_item_1") . filteredBy (Text.Taggy.Lens.allNamed (only "strong") . Text.Taggy.Lens.contents . only "Rasse:")
+extractProfileAttrs = Map.fromList . mapMaybe (\row -> (,) <$> getRowKey row <*> (getRowValue1 row <|> getRowValue2 row)) . getRows
+  where getRows = toListOf (html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item"))
+        getRowKey = fmap (Text.dropWhileEnd (==':')) . preview (to universe . traverse . filteredBy (matchClass "table_td_daten_item_1") . Taggy.children . traverse . Taggy.contents)
+        getRowValue1 = fmap (Text.dropWhileEnd (== ':')) . preview (to universe . traverse . filteredBy (matchClass "table_td_daten_item_2") . Taggy.children . traverse . Taggy.contents)
+        getRowValue2 = fmap (Text.dropWhileEnd (== ':')) . preview (to universe . traverse . filteredBy (matchClass "table_td_daten_item_2") . Taggy.contents)
 
--- extractProfileAttrs = preview (html . to universe . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_tr_daten_item") . filteredBy lfilter)
---   where lfilter = Taggy.children . traverse . Text.Taggy.Lens.element . filteredBy (matchClass "table_td_daten_item_1") . filteredBy (Text.Taggy.Lens.allNamed (only "strong") . Text.Taggy.Lens.contents . only "Rasse:")
 
 extractTitle :: Lazy.Text -> Maybe Text
 extractTitle = fmap Text.strip . preview (html . to universe . traverse . element . filteredBy (matchClass "Daten_Item_H1") . contents)
@@ -411,11 +415,11 @@ unitTests =
     , testCase "Extract picture base name" $ do
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic"
     , testCase "Allow details without race" $ do
-        let d = Details "some-uri" Nothing [] [] Nothing Map.empty
+        let d = Details "some-uri" Nothing [] [] Map.empty
         checkDetail d @?= True
     , testCase "Filter out some details based on race" $ do
-        checkDetail (Details "some-uri" Nothing [] [] (Just "Mischling Bracke") Map.empty) @?= False
-        checkDetail (Details "some-uri" Nothing [] [] (Just "Ein dackel-hund") Map.empty) @?= False
+        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Mischling Bracke")])) @?= False
+        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Ein dackel-hund")])) @?= False
     ]
 
 assertDetails :: Text -> Maybe Text -> Int -> Int -> Details -> IO ()
@@ -424,3 +428,4 @@ assertDetails theUri title numPics numVideos details = do
         detailsTitle details @?= title
         length (detailsPics details) @?= numPics
         length (detailsVideos details) @?= numVideos
+        length (detailsProfile details) @?= 6
