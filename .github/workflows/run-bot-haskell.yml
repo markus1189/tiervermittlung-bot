@@ -12,9 +12,9 @@ jobs:
       with:
         nix_path: nixpkgs=channel:nixos-unstable
     - name: Initialize Shell
-      run: nix-shell --command echo
+      run: nix shell -c echo Initialized
     - name: Run
-      run: ./dog-bot.hs
+      run: nix run
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
