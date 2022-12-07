@@ -42,7 +42,6 @@
           ${hsPkgs}/bin/runhaskell ./dog-bot.hs
         '';
       in rec {
-        defaultApp = dogBotScript;
         defaultPackage = dogBotScript;
         devShell = pkgs.mkShell { nativeBuildInputs = [ hsPkgs ]; };
       });
