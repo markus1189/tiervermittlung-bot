@@ -39,10 +39,11 @@
             unordered-containers
           ]);
         dogBotScript = pkgs.writeScriptBin "dog-bot" ''
-          ${hsPkgs}/bin/runhaskell ./dog-bot.hs
+          #!/usr/bin/env bash
+          ${hsPkgs}/bin/runhaskell ${./dog-bot.hs}
         '';
       in rec {
-        defaultPackage = dogBotScript;
+        packages.default = dogBotScript;
         devShell = pkgs.mkShell { nativeBuildInputs = [ hsPkgs ]; };
       });
 }
