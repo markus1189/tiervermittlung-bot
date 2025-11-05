@@ -45,10 +45,11 @@
             temporary
             token-bucket-fixed
             unordered-containers
+            optparse-applicative
           ]);
         dogBotScript = pkgs.writeScriptBin "dog-bot" ''
           #!/usr/bin/env bash
-          ${hsPkgs}/bin/runhaskell ${./dog-bot.hs}
+          ${hsPkgs}/bin/runhaskell ${./dog-bot.hs} "$@"
         '';
       in rec {
         packages.default = dogBotScript;

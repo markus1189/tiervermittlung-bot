@@ -91,6 +91,18 @@ import Text.Taggy.Lens
 import Text.Taggy.Lens qualified as Taggy
 import Control.Monad (unless)
 import Control.Monad (void)
+import Options.Applicative
+  ( Parser,
+    command,
+    execParser,
+    fullDesc,
+    header,
+    helper,
+    info,
+    progDesc,
+    subparser,
+    (<**>),
+  )
 
 uri :: String
 uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
@@ -258,8 +270,29 @@ sendLink d = do
   chatId <- view envChatId
   telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
 
+-- Command-line interface
+data Command = Run | Test deriving (Show, Eq)
+
+parseCommand :: Parser Command
+parseCommand =
+  subparser
+    ( command "run" (info (pure Run) (progDesc "Run the bot"))
+        <> command "test" (info (pure Test) (progDesc "Run tests"))
+    )
+
 main :: IO ()
-main = runBot
+main = do
+  cmd <-
+    execParser $
+      info
+        (parseCommand <**> helper)
+        ( fullDesc
+            <> progDesc "Dog adoption Telegram bot"
+            <> header "dog-bot - Tiervermittlung.de scraper"
+        )
+  case cmd of
+    Run -> runBot
+    Test -> runTests
 
 runBot :: IO ()
 runBot = runStack loadAndProcessEntries
@@ -474,12 +507,62 @@ unitTests =
           DirectVideo _ -> assertFailure "Not a youtube video",
       testCase "Extract picture base name" $ do
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic",
-      testCase "Allow details without race" $ do
+      -- Comprehensive breed filtering tests
+      testCase "Allow details without race field" $ do
         let d = Details "some-uri" Nothing [] [] Map.empty Nothing
         checkDetail d @?= True,
-      testCase "Filter out some details based on race" $ do
-        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Mischling Bracke")]) Nothing) @?= False
-        checkDetail (Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Ein dackel-hund")]) Nothing) @?= False
+      testCase "Allow details with empty race" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "")]) Nothing
+        checkDetail d @?= True,
+      testCase "Filter bracke (exact match)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "bracke")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter bracke (case insensitive uppercase)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "BRACKE")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter bracke (case insensitive mixed)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Bracke")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter bracke (substring match)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Mischling Bracke")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter alternate spelling brake" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "brake")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter englisch setter (exact)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "englisch setter")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter englisch setter (case insensitive)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Englisch Setter")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter malteser" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Malteser")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter malteser (in compound breed)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Malteser-Mischling")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter dackel (exact)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "dackel")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter dackel (substring)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Ein dackel-hund")]) Nothing
+        checkDetail d @?= False,
+      testCase "Filter multiple forbidden keywords in one race" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Dackel-Bracke Mix")]) Nothing
+        checkDetail d @?= False,
+      testCase "Allow similar but different breed (malinois not malteser)" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Malinois")]) Nothing
+        checkDetail d @?= True,
+      testCase "Allow breed with partial match but not forbidden" $ do
+        let d = Details "some-uri" Nothing [] [] (Map.fromList [("Rasse", "Braque")]) Nothing
+        checkDetail d @?= True,
+      testCase "Allow common German breeds" $ do
+        let d1 = Details "uri" Nothing [] [] (Map.fromList [("Rasse", "Deutscher Schäferhund")]) Nothing
+            d2 = Details "uri" Nothing [] [] (Map.fromList [("Rasse", "Golden Retriever")]) Nothing
+            d3 = Details "uri" Nothing [] [] (Map.fromList [("Rasse", "Labrador")]) Nothing
+        checkDetail d1 @?= True
+        checkDetail d2 @?= True
+        checkDetail d3 @?= True
     ]
 
 assertDetails :: Text -> Maybe Text -> Int -> Int -> Details -> IO ()

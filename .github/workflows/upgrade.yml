@@ -21,6 +21,7 @@ jobs:
       run: |
         nix flake update
         nix build
+        nix run . -- test
     - run: |
         git add .
         git commit -m "Flake Update" && git push origin || echo "nothing to do"
