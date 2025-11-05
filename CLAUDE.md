@@ -32,7 +32,7 @@ direnv allow
 ```
 
 The dev shell includes:
-- GHC with all required packages (lens, wreq, rio, taggy-lens fork, etc.)
+- GHC with all required packages (lens, wreq, rio, taggy-lens, etc.)
 - haskell-language-server for IDE support
 - Testing libraries (tasty, tasty-golden, tasty-hedgehog, tasty-hunit, tasty-hspec)
 
@@ -120,8 +120,8 @@ ghci dog-bot.hs
    - Separate HTTP sessions for Telegram and tiervermittlung.de
 
 **Dependencies:**
-- `taggy-lens-fork` - Custom fork for lens-5 compatibility (pinned to specific commit)
-- `token-bucket-jailbreak` - Rate limiting (with jailbreak and unmarkBroken)
+- `taggy-lens` - HTML parsing with lens; built from official repo's master branch (lens-5 support merged but not released to Hackage)
+- `token-bucket` - Rate limiting (requires jailbreak due to outdated time package upper bound)
 - Standard: wreq, lens, rio, retry, logging, aeson, temporary
 
 ## Common Workflows
@@ -206,11 +206,11 @@ Edit `forbiddenKeywords` list in `checkDetail` function (line 253). Matching is 
 
 ## Known Quirks
 
-1. **taggy-lens fork**: Project uses custom fork for lens-5 compatibility, pinned to specific commit. If lens version changes, may need to update fork reference.
+1. **taggy-lens from git**: Uses official `alpmestan/taggy-lens` repo's master branch instead of Hackage because lens-5 compatibility fix (PR #7, merged April 2022) hasn't been released to Hackage yet. Pinned to commit `87235bfb9c3ee8b3d487c1cf48a22f247e59286d` for reproducibility. The package works fine; maintainer just hasn't published a new version.
 
-2. **Latin-1 encoding**: tiervermittlung.de uses Latin-1 encoding, decoded via `decodeLatin1` before parsing.
+2. **token-bucket jailbreak**: Requires `doJailbreak` + `unmarkBroken` because its cabal file has outdated upper bound `time < 1.13` while current nixpkgs has `time-1.15`. The package actually works fine with newer time versions; only the version constraint is outdated. Package is marked broken in nixpkgs due to this constraint, hence the workaround. See: https://github.com/haskell-hvr/token-bucket
 
-3. **Token bucket jailbreak**: The `token-bucket` package requires `doJailbreak` and `unmarkBroken` to build with current dependencies.
+3. **Latin-1 encoding**: tiervermittlung.de uses Latin-1 encoding, decoded via `decodeLatin1` before parsing.
 
 4. **Hardcoded rate limiting**: Telegram API rate limit hardcoded to 1 request per 5 seconds (conservative to avoid hitting limits).
 

@@ -10,14 +10,22 @@
         hsPkgs = pkgs.haskellPackages.ghcWithPackages (p:
           with p;
           let
-            # https://github.com/alpmestan/taggy-lens/pull/7
-            taggy-lens-fork = (callCabal2nix "taggy-lens" (builtins.fetchGit {
-              name = "taggy-lens-fork";
-              url = "https://github.com/markus1189/taggy-lens/";
-              ref = "refs/heads/lens-5";
-              rev = "0e4c0648cd8a3bf2112b020cd9c4c9158298329b";
+            # Use official taggy-lens repo master branch which includes lens-5 support
+            # PR #7 (https://github.com/alpmestan/taggy-lens/pull/7) was merged in April 2022
+            # but hasn't been released to Hackage yet, so we build from git
+            taggy-lens-updated = (callCabal2nix "taggy-lens" (builtins.fetchGit {
+              name = "taggy-lens-lens5";
+              url = "https://github.com/alpmestan/taggy-lens/";
+              ref = "refs/heads/master";
+              # Using a recent commit that includes lens-5 support
+              rev = "87235bfb9c3ee8b3d487c1cf48a22f247e59286d";
             }) { });
-            token-bucket-jailbreak = pkgs.haskell.lib.unmarkBroken
+
+            # token-bucket requires jailbreak because it has outdated upper bound time < 1.13
+            # but current nixpkgs has time-1.15. The package works fine with newer time versions,
+            # just the cabal constraint is outdated. Package is marked broken in nixpkgs due to this.
+            # See: https://github.com/haskell-hvr/token-bucket
+            token-bucket-fixed = pkgs.haskell.lib.unmarkBroken
               (pkgs.haskell.lib.doJailbreak token-bucket);
           in [
             lens-aeson
@@ -26,7 +34,7 @@
             wreq
             lens
             rio
-            taggy-lens-fork
+            taggy-lens-updated
             haskell-language-server
             retry
             tasty
@@ -35,7 +43,7 @@
             tasty-hunit
             tasty-hspec
             temporary
-            token-bucket-jailbreak
+            token-bucket-fixed
             unordered-containers
           ]);
         dogBotScript = pkgs.writeScriptBin "dog-bot" ''
