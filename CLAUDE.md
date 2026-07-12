@@ -117,8 +117,9 @@ Tests also run in CI (`ci.yml`) on every push.
 
 4. **Telegram integration** (`sendPics`, `sendVideos`, `sendLink`)
    - Downloads media to temp directories
-   - Sends as media groups using Telegram Bot API
-   - Link message (`linkMessage`) includes title plus Rasse/Alter/Aufenthalt/Land profile fields
+   - Sends as media groups using Telegram Bot API; the album's caption is the bold dog name (`captionParts`)
+   - All Telegram messages use `parse_mode=HTML`; interpolated site content is HTML-escaped (`escapeHtml`) — matters because YouTube URLs and names can contain `&`/`<`/`>`
+   - Link message (`linkMessage`) is a formatted card: bold name, then emoji-labelled lines for Rasse, Alter + size (extracted from the `Tierart` field via `dogSize`), location (Aufenthalt/Ort/Land), and the temperament tags from `detailsAttributes`, followed by the URL
    - Rate-limited via token bucket (1 request per 5 seconds burst)
    - Retries on 429 or 5xx status codes with exponential backoff
    - `DRY_RUN` env var short-circuits both send functions to log-only

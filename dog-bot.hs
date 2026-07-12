@@ -43,12 +43,13 @@ import Control.Retry (RetryAction (ConsultPolicy, ConsultPolicyOverrideDelay, Do
 import Data.Aeson (KeyValue ((.=)), ToJSON (toJSON), object)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Lens (key, _String)
+import Data.Aeson.Types (Pair)
 import Data.ByteString.Lazy qualified as BS
 import Data.Foldable (for_)
 import Data.List (find, partition)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
@@ -135,7 +136,7 @@ telegramSendMessage (ChatId chatId) text = do
           Sess.post
             s
             theUri
-            (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
+            (toJSON (object ["chat_id" .= chatId, "text" .= text, "parse_mode" .= ("HTML" :: Text), "disable_notification" .= True]))
 
 telegramSendMediaGroup :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => [Wreq.Part] -> m ()
 telegramSendMediaGroup parts = do
@@ -172,7 +173,7 @@ sendPics d =
                         ( [ "type" .= ("photo" :: String),
                             "media" .= ("attach://" <> n)
                           ]
-                            ++ map ("caption" .=) (maybeToList (detailsTitle d))
+                            ++ captionParts d
                         )
                   )
                     . mediaName
@@ -201,7 +202,7 @@ sendVideos d = do
           (detailsVideos d)
   for_ youtubeVideos $ \case
     YoutubeVideo theUri -> do
-      telegramSendMessage (ChatId chatId) (maybe "" (<> ": ") (detailsTitle d) <> theUri)
+      telegramSendMessage (ChatId chatId) (maybe "" (\t -> escapeHtml t <> ": ") (detailsTitle d) <> escapeHtml theUri)
     DirectVideo _ -> pure ()
 
   unless (null directVideos) $ do
@@ -233,7 +234,7 @@ sendVideos d = do
                         ( [ "type" .= ("video" :: String),
                             "media" .= ("attach://" <> n)
                           ]
-                            ++ map ("caption" .=) (maybeToList (detailsTitle d))
+                            ++ captionParts d
                         )
                   )
                     . mediaName
@@ -259,13 +260,61 @@ sendLink d = do
   chatId <- view envChatId
   telegramSendMessage chatId (linkMessage d)
 
+-- Telegram is sent HTML-parsed messages, so any interpolated site content
+-- must be escaped. Order matters: `&` first, or it re-escapes the others.
+escapeHtml :: Text -> Text
+escapeHtml =
+  Text.replace ">" "&gt;"
+    . Text.replace "<" "&lt;"
+    . Text.replace "&" "&amp;"
+
+-- The site pads some values with runs of whitespace ("Mischling  (Mischling)").
+normalizeWs :: Text -> Text
+normalizeWs = Text.unwords . Text.words
+
+-- Tierart embeds the size class, e.g. "Hund (30 bis 50 cm)" -> "30–50 cm".
+dogSize :: Details -> Maybe Text
+dogSize d = do
+  tierart <- Map.lookup "Tierart" (detailsProfile d)
+  let inParens = Text.takeWhile (/= ')') . Text.drop 1 . snd $ Text.breakOn "(" tierart
+  if Text.null inParens
+    then Nothing
+    else Just (Text.replace " bis " "–" (normalizeWs inParens))
+
+-- Bold, HTML-escaped title used as the caption of a media group's first item.
+captionParts :: Details -> [Pair]
+captionParts d =
+  case detailsTitle d of
+    Nothing -> []
+    Just t ->
+      [ "caption" .= ("🐕 <b>" <> escapeHtml (normalizeWs t) <> "</b>"),
+        "parse_mode" .= ("HTML" :: Text)
+      ]
+
 linkMessage :: Details -> Text
-linkMessage d = Text.intercalate "\n" (maybeToList (detailsTitle d) ++ profileLine ++ [detailsUri d])
+linkMessage d =
+  Text.intercalate "\n" $
+    catMaybes
+      [ (\t -> "🐕 <b>" <> escapeHtml (normalizeWs t) <> "</b>") <$> detailsTitle d,
+        ("🐾 " <>) . escapeHtml <$> prof "Rasse",
+        ageSizeLine,
+        locationLine,
+        ("✨ " <>) . escapeHtml <$> (normalizeWs <$> detailsAttributes d),
+        Just (escapeHtml (detailsUri d))
+      ]
   where
-    profileLine =
-      case mapMaybe (\k -> ((k <> ": ") <>) <$> Map.lookup k (detailsProfile d)) ["Rasse", "Alter", "Aufenthalt", "Land"] of
-        [] -> []
-        fields -> [Text.intercalate " | " fields]
+    prof k = normalizeWs <$> Map.lookup k (detailsProfile d)
+    ageSizeLine =
+      case catMaybes
+        [ ("🎂 " <>) . escapeHtml <$> prof "Alter",
+          ("📏 " <>) . escapeHtml <$> dogSize d
+        ] of
+        [] -> Nothing
+        parts -> Just (Text.intercalate "  •  " parts)
+    locationLine =
+      case catMaybes [prof "Aufenthalt", prof "PLZ/Ort", prof "Land"] of
+        [] -> Nothing
+        parts -> Just ("📍 " <> escapeHtml (Text.intercalate ", " parts))
 
 main :: IO ()
 main =
@@ -294,7 +343,7 @@ loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) =
 loadAndProcessEntries = do
   yesterday <- liftIO getYesterday
   chatId <- view envChatId
-  telegramSendMessage chatId $ "Hunde vom " <> Text.pack (show yesterday)
+  telegramSendMessage chatId $ "🐶 <b>Hunde vom " <> Text.pack (show yesterday) <> "</b>"
   es <- filter (\(Entry eDay _) -> eDay == yesterday) <$> loadEntries
   liftIO . Logging.loggingLogger LevelInfo "dogbot" $ "Processing started for day=" <> show yesterday <> " with " <> show (length es) <> " entries"
   for_ ([1 ..] `zip` es) $ uncurry processEntry
@@ -509,9 +558,36 @@ unitTests =
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic",
       testCase "Link message includes profile fields" $ do
         let d = Details "https://example.com/dog" (Just "Bella") [] [] (Map.fromList [("Rasse", "Mischling"), ("Alter", "5 Monate"), ("Land", "Deutschland")]) Nothing
-        linkMessage d @?= "Bella\nRasse: Mischling | Alter: 5 Monate | Land: Deutschland\nhttps://example.com/dog",
+        linkMessage d @?= "🐕 <b>Bella</b>\n🐾 Mischling\n🎂 5 Monate\n📍 Deutschland\nhttps://example.com/dog",
+      testCase "Link message is a rich card with size and temperament" $ do
+        let d =
+              Details
+                "https://example.com/rex"
+                (Just "Rex")
+                []
+                []
+                ( Map.fromList
+                    [ ("Tierart", "Hund (30 bis 50 cm)"),
+                      ("Rasse", "Mischling  (Mischling)"),
+                      ("Alter", "5 Monate"),
+                      ("Aufenthalt", "Tierheim"),
+                      ("Land", "Rumänien")
+                    ]
+                )
+                (Just "kinderlieb, verträglich mit Katzen")
+        linkMessage d
+          @?= "🐕 <b>Rex</b>\n🐾 Mischling (Mischling)\n🎂 5 Monate  •  📏 30–50 cm\n📍 Tierheim, Rumänien\n✨ kinderlieb, verträglich mit Katzen\nhttps://example.com/rex",
+      testCase "Link message escapes HTML-significant characters" $ do
+        let d = Details "https://example.com/d?a=1&b=2" (Just "Tom & Jerry") [] [] Map.empty Nothing
+        linkMessage d @?= "🐕 <b>Tom &amp; Jerry</b>\nhttps://example.com/d?a=1&amp;b=2",
       testCase "Link message without title or profile is just the link" $ do
         linkMessage (Details "some-uri" Nothing [] [] Map.empty Nothing) @?= "some-uri",
+      testCase "escapeHtml replaces &, <, > without double-escaping" $ do
+        escapeHtml "a & b < c > d" @?= "a &amp; b &lt; c &gt; d",
+      testCase "dogSize extracts the size class from Tierart" $ do
+        dogSize (Details "u" Nothing [] [] (Map.fromList [("Tierart", "Hund (30 bis 50 cm)")]) Nothing) @?= Just "30–50 cm"
+        dogSize (Details "u" Nothing [] [] (Map.fromList [("Tierart", "Hund (über 50 cm)")]) Nothing) @?= Just "über 50 cm"
+        dogSize (Details "u" Nothing [] [] (Map.fromList [("Tierart", "Hund")]) Nothing) @?= Nothing,
       testCase "Redact token from log messages" $ do
         redactToken (Token "123:abc") "https://api.telegram.org/bot123:abc/sendMessage" @?= "https://api.telegram.org/bot<redacted>/sendMessage"
         redactToken (Token "") "unchanged" @?= "unchanged",
