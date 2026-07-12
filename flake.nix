@@ -10,17 +10,10 @@
 
         haskellDeps = p:
           let
-            # Use official taggy-lens repo master branch which includes lens-5 support
-            # PR #7 (https://github.com/alpmestan/taggy-lens/pull/7) was merged in April 2022
-            # but hasn't been released to Hackage yet, so we build from git
-            taggy-lens-updated = p.callCabal2nix "taggy-lens"
-              (builtins.fetchGit {
-                name = "taggy-lens-lens5";
-                url = "https://github.com/alpmestan/taggy-lens/";
-                ref = "refs/heads/master";
-                # Using a recent commit that includes lens-5 support
-                rev = "87235bfb9c3ee8b3d487c1cf48a22f247e59286d";
-              }) { };
+            # Hackage's taggy-lens carries a stale `lens < 5` upper bound, so
+            # nixpkgs would try to build it against an old lens. Jailbreaking
+            # drops the bound; the code itself compiles fine against lens-5.
+            taggy-lens-fixed = pkgs.haskell.lib.doJailbreak p.taggy-lens;
 
             # token-bucket requires jailbreak because it has outdated upper bound time < 1.13
             # but current nixpkgs has time-1.15. The package works fine with newer time versions,
@@ -33,7 +26,7 @@
             p.logging
             p.wreq
             p.lens
-            taggy-lens-updated
+            taggy-lens-fixed
             p.retry
             p.tasty
             p.tasty-hunit

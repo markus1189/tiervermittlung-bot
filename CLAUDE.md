@@ -132,7 +132,7 @@ Tests also run in CI (`ci.yml`) on every push.
    - Logged exceptions are passed through `redactToken` because Telegram HTTP errors embed the bot token in the request URL
 
 **Dependencies:**
-- `taggy-lens` - HTML parsing with lens; built from official repo's master branch (lens-5 support merged but not released to Hackage)
+- `taggy-lens` - HTML parsing with lens; Hackage version jailbroken to drop a stale `lens < 5` upper bound (see Known Quirks)
 - `token-bucket` - Rate limiting (requires jailbreak due to outdated time package upper bound)
 - Standard: wreq, lens, retry, logging, aeson, temporary
 
@@ -223,7 +223,7 @@ Edit `forbiddenKeywords` list in `checkDetail` function. Matching is case-insens
 
 ## Known Quirks
 
-1. **taggy-lens from git**: Uses official `alpmestan/taggy-lens` repo's master branch instead of Hackage because lens-5 compatibility fix (PR #7, merged April 2022) hasn't been released to Hackage yet. Pinned to commit `87235bfb9c3ee8b3d487c1cf48a22f247e59286d` for reproducibility. The package works fine; maintainer just hasn't published a new version.
+1. **taggy-lens jailbreak**: Uses Hackage's `taggy-lens` (in nixpkgs) with `doJailbreak` to drop its stale `lens < 5` upper bound. The code compiles cleanly against lens-5; only the cabal constraint is outdated (the fix, PR #7, was merged April 2022 but never released to Hackage). Previously this was pinned to a git commit of the maintainer's master branch — the jailbreak is equivalent and needs no external checkout.
 
 2. **token-bucket jailbreak**: Requires `doJailbreak` + `unmarkBroken` because its cabal file has outdated upper bound `time < 1.13` while current nixpkgs has `time-1.15`. The package actually works fine with newer time versions; only the version constraint is outdated. Package is marked broken in nixpkgs due to this constraint, hence the workaround. See: https://github.com/haskell-hvr/token-bucket
 
