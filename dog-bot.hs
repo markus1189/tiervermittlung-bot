@@ -1,10 +1,3 @@
-#!/usr/bin/env nix-shell
-#!nix-shell -i runhaskell
-#!nix-shell --pure
-#!nix-shell --keep TELEGRAM_BOT_TOKEN
-#!nix-shell --keep TELEGRAM_CHAT_ID
-#!nix-shell shell.nix
-
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -55,7 +48,7 @@ import Data.Foldable (for_)
 import Data.List (find, partition)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (isJust, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8)
@@ -65,7 +58,7 @@ import Data.Time (Day, defaultTimeLocale, getZonedTime, localDay, parseTimeM, zo
 import Data.Traversable (for)
 import Network.HTTP.Client
   ( HttpException (HttpExceptionRequest),
-    HttpExceptionContent (StatusCodeException),
+    HttpExceptionContent (..),
     responseHeaders,
     responseStatus,
   )
@@ -73,7 +66,7 @@ import Network.HTTP.Types.Status (Status (statusCode))
 import Network.Wreq (responseBody)
 import Network.Wreq qualified as Wreq
 import Network.Wreq.Session qualified as Sess
-import System.Environment (getEnv)
+import System.Environment (getArgs, getEnv, lookupEnv, withArgs)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty (TestTree, defaultMain, testGroup)
@@ -89,11 +82,10 @@ import Text.Taggy.Lens
     named,
   )
 import Text.Taggy.Lens qualified as Taggy
-import Control.Monad (unless)
-import Control.Monad (void)
+import Control.Monad (unless, void)
 
 uri :: String
-uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&session=kNWVQkHlAVH5axV0HJs5&Bild=&video_only=&String_Rasse=&view_records=Suchen"
+uri = "https://www.tiervermittlung.de/cgi-bin/haustier/db.cgi?db=hunde5&uid=default&ID=&Tierart=Hund&Rasse=&Groesse=&Geschlecht=weiblich&Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate&Titel=&Name=&Staat=&Land=&PLZ=&PLZ-gt=&PLZ-lt=&Ort=&Grund=&Halter=&Notfall=&Chiffre=&keyword=&Date=&referer=&Nachricht=&E1=&E2=&E3=&E4=&E5=&E6=&E7=&E8=&E9=&E10=&mh=150&sb=0&so=descend&ww=&searchinput=&layout=&Bild=&video_only=&String_Rasse=&view_records=Suchen"
 
 newtype Token = Token Text deriving (Show, Eq, Ord)
 
@@ -104,7 +96,8 @@ data MyEnv = MyEnv
     _envChatId :: ChatId,
     _envTelegramBucket :: TokenBucket,
     _envTelegramSession :: Sess.Session,
-    _envTiervermittlungSession :: Sess.Session
+    _envTiervermittlungSession :: Sess.Session,
+    _envDryRun :: Bool
   }
 
 makeClassy ''MyEnv
@@ -130,21 +123,29 @@ detailsAge = Map.lookup "Alter" . detailsProfile
 data Video = YoutubeVideo Text | DirectVideo Text deriving (Show, Eq, Ord)
 
 telegramSendMessage :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => ChatId -> Text -> m ()
-telegramSendMessage (ChatId chatId) text = withRetry . withToken $ do
-  s <- view envTelegramSession
-  theUri <- buildTelegramUri "sendMessage"
-  liftIO $
-    void $
-      Sess.post
-        s
-        theUri
-        (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
+telegramSendMessage (ChatId chatId) text = do
+  dryRun <- view envDryRun
+  if dryRun
+    then liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.dryrun" . Text.unpack $ "Would send message: " <> text
+    else withRetry . withToken $ do
+      s <- view envTelegramSession
+      theUri <- buildTelegramUri "sendMessage"
+      liftIO $
+        void $
+          Sess.post
+            s
+            theUri
+            (toJSON (object ["chat_id" .= chatId, "text" .= text, "disable_notification" .= True]))
 
 telegramSendMediaGroup :: (MonadIO m, MonadReader e m, HasMyEnv e, MonadMask m) => [Wreq.Part] -> m ()
-telegramSendMediaGroup parts = withRetry . withToken $ do
-  s <- view envTelegramSession
-  theUri <- buildTelegramUri "sendMediaGroup"
-  liftIO $ void $ Sess.post s theUri parts
+telegramSendMediaGroup parts = do
+  dryRun <- view envDryRun
+  if dryRun
+    then liftIO $ Logging.loggingLogger LevelInfo "dogbot.telegram.dryrun" $ "Would send media group with " <> show (length parts) <> " parts"
+    else withRetry . withToken $ do
+      s <- view envTelegramSession
+      theUri <- buildTelegramUri "sendMediaGroup"
+      liftIO $ void $ Sess.post s theUri parts
 
 buildTelegramUri :: (MonadReader e m, HasMyEnv e) => String -> m String
 buildTelegramUri op = do
@@ -256,10 +257,21 @@ sendLink :: (MonadReader e m, MonadIO m, HasMyEnv e, MonadMask m) => Details -> 
 sendLink d = do
   liftIO . Logging.loggingLogger LevelInfo "dogbot.telegram.sendLink" . Text.unpack $ "Sending link for " <> detailsUri d <> "\n"
   chatId <- view envChatId
-  telegramSendMessage chatId (maybe "" (<> ": ") (detailsTitle d) <> detailsUri d)
+  telegramSendMessage chatId (linkMessage d)
+
+linkMessage :: Details -> Text
+linkMessage d = Text.intercalate "\n" (maybeToList (detailsTitle d) ++ profileLine ++ [detailsUri d])
+  where
+    profileLine =
+      case mapMaybe (\k -> ((k <> ": ") <>) <$> Map.lookup k (detailsProfile d)) ["Rasse", "Alter", "Aufenthalt", "Land"] of
+        [] -> []
+        fields -> [Text.intercalate " | " fields]
 
 main :: IO ()
-main = runBot
+main =
+  getArgs >>= \case
+    ("test" : rest) -> withArgs rest runTests
+    _ -> runBot
 
 runBot :: IO ()
 runBot = runStack loadAndProcessEntries
@@ -267,12 +279,15 @@ runBot = runStack loadAndProcessEntries
 runStack :: ReaderT MyEnv IO a -> IO a
 runStack act = withStderrLogging $ do
   setLogTimeFormat "%c"
-  token <- getEnv "TELEGRAM_BOT_TOKEN"
-  chatId <- getEnv "TELEGRAM_CHAT_ID"
+  dryRun <- maybe False (not . null) <$> lookupEnv "DRY_RUN"
+  -- In dry-run mode nothing is sent to Telegram, so credentials are optional
+  let requiredEnv name = if dryRun then fromMaybe "" <$> lookupEnv name else getEnv name
+  token <- requiredEnv "TELEGRAM_BOT_TOKEN"
+  chatId <- requiredEnv "TELEGRAM_CHAT_ID"
   bucket <- newTokenBucket
   s1 <- Sess.newAPISession
   s2 <- Sess.newAPISession
-  let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket s1 s2
+  let theEnv = MyEnv (Token (Text.pack token)) (ChatId chatId) bucket s1 s2 dryRun
   runReaderT act theEnv
 
 loadAndProcessEntries :: (MonadReader e m, MonadIO m, MonadMask m, HasMyEnv e) => m ()
@@ -298,7 +313,9 @@ processEntry i (Entry _ eLink) = do
         sendLink d
       else liftIO . Logging.loggingLogger LevelDebug "dogbot" $ "Skipping details: " <> show d
   case r of
-    Left e -> liftIO . Logging.loggingLogger LevelError "dogbot" $ Text.unpack ("Failed to process entry with link: " <> eLink <> "\n") <> show e
+    Left e -> do
+      token <- view envToken
+      liftIO . Logging.loggingLogger LevelError "dogbot" . Text.unpack . redactToken token $ "Failed to process entry with link: " <> eLink <> "\n" <> Text.pack (show e)
     Right () -> liftIO . Logging.loggingLogger LevelInfo "dogbot" . Text.unpack $ "Finished processing entry: " <> eLink
 
 getYesterday :: IO Day
@@ -324,10 +341,6 @@ loadEntries = do
 extractEntries body =
   mapMaybe (\e -> Entry <$> (extractDate e >>= parseDate) <*> extractLink e) $
     body ^.. html . to universe . traverse . element . filtered (\n -> isJust (n ^? matchId "Item_Results"))
-
-loadDetails detailUri = do
-  s <- view envTiervermittlungSession
-  withRetry (liftIO $ Sess.get s (Text.unpack detailUri) <&> view responseBody <&> decodeLatin1)
 
 loadDetailsAndExtract :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => Text -> m Details
 loadDetailsAndExtract detailUri = do
@@ -381,12 +394,20 @@ downloadImage theUri = do
   s <- view envTiervermittlungSession
   withRetry (liftIO $ Sess.get s theUri <&> view responseBody)
 
-withRetry :: (MonadIO m, MonadMask m) => m a -> m a
-withRetry action =
-  recoveringDynamic (fullJitterBackoff (round @Double 1e6) <> limitRetries 5) [const $ Handler retryStatusException] $ const action
+withRetry :: (MonadIO m, MonadMask m, MonadReader e m, HasMyEnv e) => m a -> m a
+withRetry action = do
+  token <- view envToken
+  recoveringDynamic (fullJitterBackoff (round @Double 1e6) <> limitRetries 5) [const $ Handler (retryStatusException token)] $ const action
 
-retryStatusException :: (MonadIO m) => HttpException -> m RetryAction
-retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
+-- Telegram HTTP exceptions embed the full request URL, whose path contains
+-- the bot token; anything derived from them must be redacted before logging.
+redactToken :: Token -> Text -> Text
+redactToken (Token token)
+  | Text.null token = id
+  | otherwise = Text.replace token "<redacted>"
+
+retryStatusException :: (MonadIO m) => Token -> HttpException -> m RetryAction
+retryStatusException _ (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
   let s = statusCode (responseStatus r)
       body = decodeUtf8 rBody
       retryAfterFromHeader = (>>= readMaybe @Int) $ fmap (Text.unpack . decodeUtf8 . snd) $ find (\(k, _) -> k == "retry-after") $ responseHeaders r
@@ -409,9 +430,21 @@ retryStatusException (HttpExceptionRequest _ (StatusCodeException r rBody)) = do
     descriptionsToRetry =
       [ "Bad Request: group send failed"
       ]
-retryStatusException e = do
-  liftIO $ Logging.loggingLogger LevelDebug "dogbot.retry.http" $ "Not retrying unknown exception: " <> show e
+retryStatusException token (HttpExceptionRequest _ content)
+  | transientNetworkError content = do
+      liftIO . Logging.loggingLogger LevelDebug "dogbot.retry.http" . Text.unpack . redactToken token $ "Retrying transient network error: " <> Text.pack (show content)
+      pure ConsultPolicy
+retryStatusException token e = do
+  liftIO . Logging.loggingLogger LevelDebug "dogbot.retry.http" . Text.unpack . redactToken token $ "Not retrying unknown exception: " <> Text.pack (show e)
   pure DontRetry
+
+transientNetworkError :: HttpExceptionContent -> Bool
+transientNetworkError = \case
+  ResponseTimeout -> True
+  ConnectionTimeout -> True
+  ConnectionFailure _ -> True
+  ConnectionClosed -> True
+  _ -> False
 
 withToken :: (MonadIO m, MonadReader e m, HasMyEnv e) => m a -> m a
 withToken action = do
@@ -474,6 +507,14 @@ unitTests =
           DirectVideo _ -> assertFailure "Not a youtube video",
       testCase "Extract picture base name" $ do
         mediaName "https://www.tiervermittlung.de/cgi-bin/haustier/items/1492551/pics/j1492551-2.pic" @?= "j1492551-2.pic",
+      testCase "Link message includes profile fields" $ do
+        let d = Details "https://example.com/dog" (Just "Bella") [] [] (Map.fromList [("Rasse", "Mischling"), ("Alter", "5 Monate"), ("Land", "Deutschland")]) Nothing
+        linkMessage d @?= "Bella\nRasse: Mischling | Alter: 5 Monate | Land: Deutschland\nhttps://example.com/dog",
+      testCase "Link message without title or profile is just the link" $ do
+        linkMessage (Details "some-uri" Nothing [] [] Map.empty Nothing) @?= "some-uri",
+      testCase "Redact token from log messages" $ do
+        redactToken (Token "123:abc") "https://api.telegram.org/bot123:abc/sendMessage" @?= "https://api.telegram.org/bot<redacted>/sendMessage"
+        redactToken (Token "") "unchanged" @?= "unchanged",
       testCase "Allow details without race" $ do
         let d = Details "some-uri" Nothing [] [] Map.empty Nothing
         checkDetail d @?= True,

@@ -5,13 +5,17 @@ Rated by **Value** (impact on reliability, usefulness, maintainability) and
 🔧 small → 🔧🔧🔧 large effort. Grouped by theme, roughly ordered by
 value-per-effort within each group.
 
-Quick-win shortlist (high value, low effort): **1, 2, 5, 8, 14, 19, 24, 30**.
+Quick-win shortlist (high value, low effort): **1, 2, 5, 8, 14, 19, 24, 30** —
+all implemented ✅, along with the low-hanging parts of **10** (`test`
+argument + CI workflow), **22/25** (dead `loadDetails`, duplicate imports,
+broken shebang block, `old_shell.nix`), and **28** (`.gitignore`, untracked
+`result`).
 
 ---
 
 ## Correctness & reliability (bugs and near-bugs)
 
-### 1. Bot token can leak into GitHub Actions logs — ⭐⭐⭐ / 🔧
+### 1. Bot token can leak into GitHub Actions logs — ⭐⭐⭐ / 🔧 — ✅ done
 `processEntry` logs `show e` for any `SomeException`. For Telegram calls,
 `HttpExceptionRequest` includes the full request, whose path contains
 `bot<TELEGRAM_BOT_TOKEN>`. A failed Telegram request after retries therefore
@@ -21,7 +25,7 @@ longer `Show` output with escaping). Fix: sanitize exceptions before logging
 (strip/redact the token substring), or log only status code + response body
 for HTTP errors.
 
-### 2. `nix build` never typechecks the bot — ⭐⭐⭐ / 🔧🔧
+### 2. `nix build` never typechecks the bot — ⭐⭐⭐ / 🔧🔧 — ✅ done
 `packages.default` is just a `writeScriptBin` wrapper around `runhaskell`,
 so `nix build` succeeds even if `dog-bot.hs` doesn't compile. Consequence:
 the nightly `upgrade.yml` bumps nixpkgs, runs `nix build` "successfully",
@@ -48,7 +52,7 @@ A listing with 11+ photos fails the whole media send (retry loop even
 recognizes "group send failed" and retries futilely 5 times). Fix:
 `chunksOf 10` and send multiple groups.
 
-### 5. Transient network errors are never retried — ⭐⭐ / 🔧
+### 5. Transient network errors are never retried — ⭐⭐ / 🔧 — ✅ done
 `retryStatusException` only retries `StatusCodeException`. Connection
 timeouts, resets, DNS blips (`ConnectionTimeout`, `ConnectionFailure`,
 `ResponseTimeout`) hit the catch-all clause → `DontRetry`. For a bot that
@@ -69,7 +73,7 @@ silently drops the tail. Unlikely at current filter breadth, but becomes
 real if filters are widened. Fix: paginate until entries older than
 yesterday appear, or at least log a warning when exactly 150 entries parse.
 
-### 8. Hardcoded stale `session=` parameter in search URL — ⭐ / 🔧
+### 8. Hardcoded stale `session=` parameter in search URL — ⭐ / 🔧 — ✅ done (verified against live site: identical results without it)
 The URL carries `session=kNWVQkHlAVH5axV0HJs5`, someone's captured session
 value. It appears the site ignores stale values today, but it's a booby
 trap. Fix: drop the parameter (and the empty `E1..E10=` noise) and verify
@@ -85,7 +89,7 @@ with #3 for full recovery.
 
 ## Testing & CI
 
-### 10. Tests are never run automatically — ⭐⭐⭐ / 🔧
+### 10. Tests are never run automatically — ⭐⭐⭐ / 🔧 — ✅ done (`dog-bot test` + ci.yml)
 Tests exist but require manually editing `main`. Fix in two small steps:
 1. Argument dispatch: `main = getArgs >>= \case ["test"] -> runTests; _ -> runBot`.
 2. A CI workflow on push/PR that runs `nix develop -c runhaskell dog-bot.hs test`
@@ -114,7 +118,7 @@ non-empty response.
 
 ## Features
 
-### 14. Richer notification content — ⭐⭐ / 🔧
+### 14. Richer notification content — ⭐⭐ / 🔧 — ✅ done
 The link message is just `Title: URL`. The profile map already contains
 Rasse, Alter, Ort etc. — include them (`parse_mode=HTML`, a few bold
 labels). Value for the human scanning 20 dogs per morning is high; the code
@@ -140,7 +144,7 @@ follow-up of #16; the Reader-env structure makes this a loop over configs.
 E.g. flag `Notfall` listings, or a keyword allowlist that pins ❤️ to
 matches. Substring machinery already exists in `checkDetail`.
 
-### 19. Dry-run mode — ⭐⭐ / 🔧
+### 19. Dry-run mode — ⭐⭐ / 🔧 — ✅ done (DRY_RUN env var)
 `DRY_RUN=1` (or `main` arg, see #10) that logs what *would* be sent instead
 of calling Telegram. Makes local iteration possible without spamming the
 real chat or needing a second bot token.
@@ -161,7 +165,7 @@ files into runner memory (`downloadImage` is fully strict).
 
 ## Code quality
 
-### 22. Remove dead code and duplicate imports — ⭐ / 🔧
+### 22. Remove dead code and duplicate imports — ⭐ / 🔧 — ✅ mostly done (loadDetails and duplicate imports removed; sendVideos redundancy remains)
 `loadDetails` (l.328) is never called; `import Control.Monad (unless)` and
 `(void)` are two separate import lines (l.92–93) that belong in one; in
 `sendVideos`, `videoNames` are already the result of `mediaName` yet
@@ -175,12 +179,12 @@ unreachable patterns go away (e.g. `mapMaybe` into two typed lists instead
 of `partition` + partial lambdas). Then compile `-Wall -Werror` (via #2's
 build) so warnings can't rot.
 
-### 24. Prune unused dependencies — ⭐ / 🔧
+### 24. Prune unused dependencies — ⭐ / 🔧 — ✅ done
 `rio`, `either`, `unordered-containers`, `tasty-golden` (until #12),
 `tasty-hedgehog`, `tasty-hspec` are in `flake.nix` but unused in the code.
 Every one costs build time in the nightly upgrade job.
 
-### 25. Fix or remove the stale shebang block — ⭐ / 🔧
+### 25. Fix or remove the stale shebang block — ⭐ / 🔧 — ✅ done (removed, old_shell.nix deleted)
 Lines 1–6 reference `shell.nix`, which was renamed `old_shell.nix`, so
 direct `./dog-bot.hs` execution is broken. Either point it at the flake
 (`nix shell .#`-style) or delete the block and `old_shell.nix` together.
@@ -202,7 +206,7 @@ do it when it breaks, but keep it on the radar.
 
 ## Repo hygiene & infrastructure
 
-### 28. Add a `.gitignore`; untrack `result` — ⭐⭐ / 🔧
+### 28. Add a `.gitignore`; untrack `result` — ⭐⭐ / 🔧 — ✅ done
 There is no `.gitignore`, and the `result` symlink **is committed**
 (CLAUDE.md claims otherwise). Ignore `result`, `.direnv/`, `*.~undo-tree~`,
 `dist-newstyle/`; `git rm --cached result`.
@@ -215,7 +219,7 @@ There is no `.gitignore`, and the `result` symlink **is committed**
 updates. Also: the flake `description` is still "A very basic flake", and
 `devShell` is the deprecated attr name (`devShells.default` is current).
 
-### 30. De-conflict the two 3:30 AM cron jobs — ⭐ / 🔧
+### 30. De-conflict the two 3:30 AM cron jobs — ⭐ / 🔧 — ✅ done
 `run-bot-haskell.yml` and `upgrade.yml` fire at the same minute: the bot
 run races the flake update (and pays an uncached eval of the *new* nixpkgs
 right when it should be doing its job). Stagger them (upgrade at 02:30,

@@ -18,9 +18,10 @@ A Telegram bot that scrapes dog adoption listings from tiervermittlung.de, filte
 **Environment:**
 - Nix with flakes enabled
 - direnv (`.envrc` configured with `use flake`)
-- Two environment variables for runtime:
+- Environment variables for runtime:
   - `TELEGRAM_BOT_TOKEN` - Telegram bot authentication
   - `TELEGRAM_CHAT_ID` - Target chat for notifications
+  - `DRY_RUN` (optional) - Set to any non-empty value to log what would be sent instead of calling Telegram; makes the two variables above optional
 
 **Development shell:**
 ```bash
@@ -32,42 +33,49 @@ direnv allow
 ```
 
 The dev shell includes:
-- GHC with all required packages (lens, wreq, rio, taggy-lens, etc.)
-- haskell-language-server for IDE support
-- Testing libraries (tasty, tasty-golden, tasty-hedgehog, tasty-hunit, tasty-hspec)
+- GHC with all required packages (lens, wreq, taggy-lens, etc.)
+- haskell-language-server for IDE support (dev shell only, not in the build closure)
+- Testing libraries (tasty, tasty-hunit)
 
 ## Building and Running
 
 ### Build
 ```bash
-# Build the bot script
+# Compile the bot with GHC (also serves as a typecheck gate)
 nix build
 
-# Result symlink points to executable wrapper
+# Result symlink points to the compiled binary
 ./result/bin/dog-bot
 ```
 
 ### Run Directly
 ```bash
-# Run without building (requires env vars)
+# Run without building (requires env vars, or DRY_RUN=1)
 nix run
+
+# Dry run: scrape and log, but send nothing to Telegram (no credentials needed)
+DRY_RUN=1 nix run
 
 # Or run the Haskell script directly in dev shell
 runhaskell dog-bot.hs
 ```
 
 ### Run Tests
-The `dog-bot.hs` file contains both the bot implementation and tests. Tests use the Tasty framework and HTML fixtures in `fixtures/`:
+The `dog-bot.hs` file contains both the bot implementation and tests. Tests use the Tasty framework and HTML fixtures in `fixtures/`. The `test` argument dispatches to the test suite (extra args are passed through to Tasty):
 
 ```bash
-# In dev shell, load in GHCi to run tests interactively
+# After nix build
+./result/bin/dog-bot test
+
+# Or in the dev shell
+runhaskell dog-bot.hs test
+
+# Interactively in GHCi
 ghci dog-bot.hs
-
-# Then in GHCi
 > runTests
-
-# To run as script (modify main function to call runTests instead of runBot)
 ```
+
+Tests also run in CI (`ci.yml`) on every push.
 
 **Test fixtures:**
 - `fixtures/search.html` - Search results page (150 entries)
@@ -110,19 +118,23 @@ ghci dog-bot.hs
 4. **Telegram integration** (`sendPics`, `sendVideos`, `sendLink`)
    - Downloads media to temp directories
    - Sends as media groups using Telegram Bot API
+   - Link message (`linkMessage`) includes title plus Rasse/Alter/Aufenthalt/Land profile fields
    - Rate-limited via token bucket (1 request per 5 seconds burst)
    - Retries on 429 or 5xx status codes with exponential backoff
+   - `DRY_RUN` env var short-circuits both send functions to log-only
 
 5. **HTTP resilience** (`withRetry`, `retryStatusException`)
    - Retry policy: full jitter backoff starting at 1s, max 5 retries
    - Respects `Retry-After` headers from Telegram API
    - Also retries "Bad Request: group send failed" errors
+   - Retries transient network errors (connection/response timeouts, connection failures/closes)
    - Separate HTTP sessions for Telegram and tiervermittlung.de
+   - Logged exceptions are passed through `redactToken` because Telegram HTTP errors embed the bot token in the request URL
 
 **Dependencies:**
 - `taggy-lens` - HTML parsing with lens; built from official repo's master branch (lens-5 support merged but not released to Hackage)
 - `token-bucket` - Rate limiting (requires jailbreak due to outdated time package upper bound)
-- Standard: wreq, lens, rio, retry, logging, aeson, temporary
+- Standard: wreq, lens, retry, logging, aeson, temporary
 
 ## Common Workflows
 
@@ -133,14 +145,16 @@ nix develop
 
 # 2. Modify dog-bot.hs
 
-# 3. Quick syntax check
-runhaskell dog-bot.hs  # Will fail on missing env vars but validates syntax
+# 3. Typecheck (compiles with -Wall)
+nix build
 
-# 4. Run tests by temporarily changing main
-# Edit: main = runTests  (instead of main = runBot)
-runhaskell dog-bot.hs
+# 4. Run tests
+runhaskell dog-bot.hs test
 
-# 5. Test with real bot (requires credentials)
+# 5. Dry run against the live site without sending anything to Telegram
+DRY_RUN=1 runhaskell dog-bot.hs
+
+# 6. Test with real bot (requires credentials)
 export TELEGRAM_BOT_TOKEN="your-token"
 export TELEGRAM_CHAT_ID="your-chat-id"
 runhaskell dog-bot.hs
@@ -159,7 +173,7 @@ git add flake.lock && git commit -m "Flake Update"
 ```
 
 ### Updating search criteria
-The search URL is hardcoded in `uri` constant (line 95-96). Current filters:
+The search URL is hardcoded in the `uri` constant. Current filters:
 - `Tierart=Hund` - Dog type
 - `Geschlecht=weiblich` - Female
 - `Alter-gt=3&Alter-lt=15.1&Zeitwert=Monate` - Age 3-15 months
@@ -168,7 +182,7 @@ The search URL is hardcoded in `uri` constant (line 95-96). Current filters:
 To modify search parameters, edit the URL query string and test with fixtures.
 
 ### Adding/removing breed filters
-Edit `forbiddenKeywords` list in `checkDetail` function (line 253). Matching is case-insensitive substring search against the "Rasse" profile field.
+Edit `forbiddenKeywords` list in `checkDetail` function. Matching is case-insensitive substring search against the "Rasse" profile field.
 
 ## Code Conventions
 
@@ -183,26 +197,29 @@ Edit `forbiddenKeywords` list in `checkDetail` function (line 253). Matching is 
 - Logging at multiple levels (Debug, Info, Error) with `Control.Logging`
 
 **Testing:**
-- Tests inline with main code (bottom of file, lines 425-492)
-- Golden test fixtures in `fixtures/` directory
-- `runTests` function for manual test execution
+- Tests inline with main code (bottom of file)
+- HTML test fixtures in `fixtures/` directory
+- Run via `dog-bot test` argument (or `runTests` in GHCi)
 
 **Nix integration:**
-- Shebang at top supports standalone script execution via nix-shell (currently references old shell.nix)
-- Flake provides both development shell and production wrapper script
-- `writeScriptBin` creates executable wrapper that runs via `runhaskell`
+- Flake provides a development shell (with haskell-language-server) and a compiled binary
+- `nix build` compiles `dog-bot.hs` with `ghc -Wall`, so it doubles as a typecheck gate
 
 ## GitHub Actions
 
 **run-bot-haskell.yml:**
 - Schedule: Daily at 3:30 AM UTC
 - Manual trigger: `workflow_dispatch`
-- Runs `nix run` with secrets from GitHub
+- Builds (typechecks), then runs `nix run` with secrets from GitHub
 
 **upgrade.yml:**
-- Schedule: Daily at 3:30 AM UTC
-- Auto-updates flake.lock and commits changes
+- Schedule: Daily at 2:30 AM UTC (staggered an hour before the bot run)
+- Auto-updates flake.lock, builds, and commits changes
 - Ensures dependencies stay current
+
+**ci.yml:**
+- Runs on every push and via `workflow_dispatch`
+- `nix build` (compile + typecheck) followed by the test suite
 
 ## Known Quirks
 
@@ -214,8 +231,4 @@ Edit `forbiddenKeywords` list in `checkDetail` function (line 253). Matching is 
 
 4. **Hardcoded rate limiting**: Telegram API rate limit hardcoded to 1 request per 5 seconds (conservative to avoid hitting limits).
 
-5. **Undo-tree backups**: Repository contains `.~undo-tree~` files from editor backups (not in .gitignore).
-
-6. **Tests require manual execution**: Tests are embedded but must be manually invoked by changing `main` function. Consider adding a CLI flag or separate test entrypoint.
-
-7. **Result symlink**: `nix build` creates `result` symlink in repo root (gitignored).
+5. **Result symlink**: `nix build` creates `result` symlink in repo root (gitignored).
